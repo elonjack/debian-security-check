@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Debian 12/13 security health check and conservative updater.
-# Default mode does not install or remove packages. It only refreshes APT metadata.
+# Interactive check mode does not install or remove packages. It only refreshes APT metadata.
 
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="1.2.0"
+SCRIPT_VERSION="1.2.1"
 MODE="check"
 INTERACTIVE_MENU=0
 REFRESH_APT=1
@@ -38,6 +38,7 @@ usage() {
   --check       直接运行普通检查，不显示菜单
   --fix         执行 apt-get upgrade --with-new-pkgs
   --no-refresh  不执行 apt-get update（结果可能不是最新）
+  -V, --version 显示脚本版本
   -h, --help    显示帮助
 
 退出码：0=未发现需处理项，1=有警告/待更新/待重启，2=严重问题或检查失败。
@@ -48,12 +49,12 @@ EOF
 
 if (($# == 0)) && [[ -t 0 ]]; then
   INTERACTIVE_MENU=1
-  printf '\n%sDebian 安全检查与修复%s\n' "$C_BOLD" "$C_RESET"
+  printf '\n%sDebian 安全检查与修复 v%s%s\n' "$C_BOLD" "$SCRIPT_VERSION" "$C_RESET"
   printf '%s\n' '建议第一次使用时先选择 1。只有检查结果建议修复时，才选择 2。'
 
   while true; do
     printf '\n%s\n' '  1) 普通检查（推荐先选，不安装更新）'
-    printf '%s\n'   '  2) 检查并修复（会安装 Debian 可用更新）'
+    printf '%s\n' '  2) 检查并修复（安装所有已配置 APT 源的可用更新）'
     printf '%s\n'   '  0) 退出'
     printf '\n请选择 [1/2/0]：'
 
@@ -68,7 +69,7 @@ if (($# == 0)) && [[ -t 0 ]]; then
         break
         ;;
       2)
-        printf '\n修复模式会先检查，检查通过后安装可用更新，但不会自动重启。\n'
+        printf '\n修复模式会先检查，然后安装所有已配置 APT 软件源的可用更新（可能包括第三方源），但不会自动重启。\n'
         printf '确认继续吗？[y/N]：'
         read -r CONFIRM_FIX || CONFIRM_FIX=""
         case "$CONFIRM_FIX" in
@@ -97,6 +98,7 @@ while (($#)); do
     --check) MODE="check" ;;
     --fix) MODE="fix" ;;
     --no-refresh) REFRESH_APT=0 ;;
+    -V|--version) printf '%s\n' "$SCRIPT_VERSION"; exit 0 ;;
     -h|--help) usage; exit 0 ;;
     *) printf '未知参数：%s\n\n' "$1" >&2; usage >&2; exit 2 ;;
   esac
@@ -177,7 +179,7 @@ case "$VERSION" in
     ;;
 esac
 
-if have systemd-detect-virt && systemd-detect-virt --quiet --container; then
+if { have systemd-detect-virt && systemd-detect-virt --quiet --container; } || [[ -e /.dockerenv || -e /run/.containerenv ]]; then
   IN_CONTAINER=1
   warn "检测到容器环境：容器共享宿主机内核，必须在宿主机更新并重启内核。"
 else
@@ -240,8 +242,8 @@ if [[ "$MODE" == "fix" ]]; then
   elif ((PREFLIGHT_CRITICALS > 0)); then
     critical "修复前检查存在严重问题。为避免错误升级，已停止安装；请先处理上面的严重项。"
   else
-    info "执行 apt-get upgrade --with-new-pkgs；不会主动删除软件，也不会自动重启。"
-    if run_root apt-get upgrade --with-new-pkgs; then
+    info "执行 apt-get -y upgrade --with-new-pkgs；不会主动删除软件，也不会自动重启。"
+    if run_root apt-get -y upgrade --with-new-pkgs; then
       ok "可安全升级的软件包已处理。"
     else
       critical "升级失败，请检查上面的 APT/dpkg 错误。"
@@ -273,11 +275,11 @@ if have debsecan && [[ -n "$CODENAME" ]]; then
   info "运行 debsecan，检查已有修复可安装的漏洞包……"
   if DEBSECAN_OUTPUT="$(debsecan --suite "$CODENAME" --format packages --only-fixed 2>/dev/null | sort -u)"; then
     if [[ -n "$DEBSECAN_OUTPUT" ]]; then
-    PATCH_RECOMMENDED=1
-    DEBSECAN_COUNT="$(wc -l <<<"$DEBSECAN_OUTPUT" | tr -d ' ')"
-    warn "debsecan 报告 $DEBSECAN_COUNT 个存在可用安全修复的软件包："
-    sed -n '1,30p' <<<"$DEBSECAN_OUTPUT" | sed 's/^/  /'
-    if ((DEBSECAN_COUNT > 30)); then info "仅显示前 30 个。"; fi
+      PATCH_RECOMMENDED=1
+      DEBSECAN_COUNT="$(wc -l <<<"$DEBSECAN_OUTPUT" | tr -d ' ')"
+      warn "debsecan 报告 $DEBSECAN_COUNT 个存在可用安全修复的软件包："
+      sed -n '1,30p' <<<"$DEBSECAN_OUTPUT" | sed 's/^/  /'
+      if ((DEBSECAN_COUNT > 30)); then info "仅显示前 30 个。"; fi
     else
       ok "debsecan 未发现已有修复但尚未更新的软件包。"
     fi
@@ -309,6 +311,12 @@ else
     UPSTREAM_VERSION="$(sed -nE 's/^([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' <<<"$SOURCE_VERSION")"
     FIXED_UPSTREAM=""
     FIXED_DEBIAN=""
+    VERSION_IS_FIXED=0
+    SOURCE_IS_OFFICIAL=0
+
+    case "$SOURCE_PACKAGE" in
+      linux|linux-6.12|linux-signed-amd64|linux-signed-arm64|linux-signed-i386) SOURCE_IS_OFFICIAL=1 ;;
+    esac
 
     case "$VERSION:$UPSTREAM_VERSION" in
       13:6.12.*)
@@ -322,13 +330,26 @@ else
         ;;
     esac
 
-    if [[ -z "$FIXED_UPSTREAM" ]]; then
+    if ((SOURCE_IS_OFFICIAL == 0)); then
+      critical "运行内核来源 $SOURCE_PACKAGE 不在 Debian 官方内核源包白名单内，不能自动判定 CVE 状态。"
+    elif [[ -z "$FIXED_UPSTREAM" ]]; then
       critical "该内核分支不在 Debian 12/13 官方修复表内，不能自动判定 CVE 状态。"
-    elif dpkg --compare-versions "$UPSTREAM_VERSION" ge "$FIXED_UPSTREAM"; then
-      ok "运行中内核已达到 CVE-2026-98432 修复线（Debian 修复版本：$FIXED_DEBIAN）。"
     else
-      PATCH_RECOMMENDED=1
-      critical "运行中内核仍低于修复线 $FIXED_DEBIAN；更新内核后必须重启。"
+      if [[ "$SOURCE_PACKAGE" == "linux" || "$SOURCE_PACKAGE" == "linux-6.12" ]]; then
+        if dpkg --compare-versions "$SOURCE_VERSION" ge "$FIXED_DEBIAN"; then
+          VERSION_IS_FIXED=1
+        fi
+      elif dpkg --compare-versions "$UPSTREAM_VERSION" ge "$FIXED_UPSTREAM"; then
+        # linux-signed-* 使用与对应 linux 源包相同的上游版本，但 Debian 修订后缀不同。
+        VERSION_IS_FIXED=1
+      fi
+
+      if ((VERSION_IS_FIXED)); then
+        ok "运行中内核已达到 CVE-2026-98432 修复线（Debian 修复版本：$FIXED_DEBIAN）。"
+      else
+        PATCH_RECOMMENDED=1
+        critical "运行中内核仍低于修复线 $FIXED_DEBIAN；更新内核后必须重启。"
+      fi
     fi
   fi
 fi
@@ -386,7 +407,7 @@ if ((CRITICALS > 0)); then
 elif ((WARNINGS > 0)); then
   printf '%s没有发现已确认的严重问题，但有 %d 个警告/待处理项。%s\n' "$C_YELLOW" "$WARNINGS" "$C_RESET"
 else
-  printf '%s检查通过，未发现需立即处理的问题。%s\n' "$C_GREEN" "$C_RESET"
+  printf '%s检查完成，未发现当前可安装更新或本脚本能够确认的严重问题。%s\n' "$C_GREEN" "$C_RESET"
 fi
 
 section "下一步"
@@ -411,7 +432,7 @@ elif [[ "$MODE" == "check" ]]; then
   elif ((CRITICALS > 0)); then
     printf '%s存在无法由本脚本自动判断或修复的问题。%s 请按上面的严重提示人工处理，不要把运行 --fix 当成已经修好。\n' "$C_RED" "$C_RESET"
   else
-    printf '%s当前无需运行 --fix。%s 如果只有自动更新、扫描工具等建议项，可以稍后按需配置。\n' "$C_GREEN" "$C_RESET"
+    printf '%s当前没有可通过本脚本安装的更新，无需运行 --fix。%s 这不代表所有第三方软件或尚无补丁的漏洞都已消失。\n' "$C_GREEN" "$C_RESET"
   fi
 else
   if ((REBOOT_RECOMMENDED)); then

@@ -4,6 +4,56 @@
 
 脚本默认只刷新 APT 软件包索引并检查系统，不安装或删除软件。`--fix` 模式会先进行预检，只有在系统版本、安全软件源和 APT 索引均无严重问题时，才安装仓库中已经提供的更新。
 
+## 先获取脚本
+
+仅输入下面这条命令并不能下载脚本：
+
+```bash
+sudo bash debian-security-check.sh
+```
+
+它只会执行当前目录中已经存在的 `debian-security-check.sh`。必须先从 GitHub Release 下载或上传到 VPS。
+
+### 私有仓库的下载方法
+
+本仓库当前是私有仓库，未登录 GitHub 的 VPS 直接使用 `curl` 会得到 `404`。可以先在已经登录 GitHub CLI 的电脑上下载 Release：
+
+```bash
+gh release download v1.2.1 \
+  --repo elonjack/debian-security-check \
+  --pattern debian-security-check.sh \
+  --pattern SHA256SUMS
+```
+
+然后上传到 VPS：
+
+```bash
+scp debian-security-check.sh SHA256SUMS root@你的VPS地址:/root/
+```
+
+登录 VPS 后校验并运行：
+
+```bash
+cd /root
+sha256sum -c SHA256SUMS
+sudo bash debian-security-check.sh
+```
+
+### 如果以后将仓库设为公开
+
+公开仓库可以直接在 VPS 下载最新版 Release：
+
+```bash
+curl -fL -o debian-security-check.sh \
+  https://github.com/elonjack/debian-security-check/releases/latest/download/debian-security-check.sh
+curl -fL -o SHA256SUMS \
+  https://github.com/elonjack/debian-security-check/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS
+sudo bash debian-security-check.sh
+```
+
+不要使用未经校验的 `curl ... | bash`，因为这样会把网络返回内容直接交给 root 执行，也不方便先阅读脚本。
+
 ## 功能
 
 - 检查 Debian 版本、架构和支持状态
@@ -27,7 +77,7 @@ sudo bash debian-security-check.sh
 
 ```text
 1) 普通检查（推荐先选，不安装更新）
-2) 检查并修复（会安装 Debian 可用更新）
+2) 检查并修复（安装所有已配置 APT 源的可用更新）
 0) 退出
 ```
 
@@ -83,10 +133,12 @@ sudo bash debian-security-check.sh
 1. 检查 Debian 版本、支持状态和 security 软件源。
 2. 执行 `apt-get update`，要求所有软件源成功刷新。
 3. 显示修复前的 hold 包和待更新数量。
-4. 仅在预检没有严重问题时执行 `apt-get upgrade --with-new-pkgs`。
+4. 仅在预检没有严重问题时执行 `apt-get -y upgrade --with-new-pkgs`。
 5. 重新检查待更新包、漏洞状态、运行中内核和重启需求。
 
 脚本不会自动解除 hold、不会运行会主动删除包的 `dist-upgrade/full-upgrade`，也不会自动重启服务器。
+
+修复模式更新的是所有已配置 APT 软件源中的可用包，不仅是 Debian security 仓库；如果系统配置了第三方软件源，对应软件也可能被更新。
 
 ### 第三步：根据修复结果决定是否重启
 
@@ -106,7 +158,7 @@ sudo bash debian-security-check.sh
 
 ## 自动化和批量服务器
 
-菜单适合人工操作。Ansible、定时任务或批量 SSH 不能等待人工输入，因此仍然保留参数模式：
+菜单适合人工操作。Ansible、定时任务或批量 SSH 不能等待菜单输入，因此仍然保留参数模式；但修复会更新软件并可能重启服务，应先在测试机验证：
 
 ```bash
 # 直接检查，不显示菜单
