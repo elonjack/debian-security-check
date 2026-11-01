@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Debian 12/13 security health check and conservative updater.
-# Interactive check mode does not install or remove packages. It only refreshes APT metadata.
+# Interactive smart mode checks first, installs available updates only after a clean preflight,
+# and reboots after a successful update or when a newly installed kernel needs activation.
 
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="1.2.5"
+SCRIPT_VERSION="1.3.0"
 MODE="check"
 INTERACTIVE_MENU=0
 REFRESH_APT=1
@@ -16,6 +17,7 @@ REBOOT_RECOMMENDED=0
 PREFLIGHT_CRITICALS=0
 RUNNING_KERNEL_VULNERABLE=0
 KERNEL_UPDATE_NEEDED=0
+SMART_UPDATES_APPLIED=0
 
 if [[ -t 1 && "${NO_COLOR:-}" == "" ]]; then
   C_RED=$'\033[31m'
@@ -45,20 +47,21 @@ usage() {
 
 退出码：0=未发现需处理项，1=有警告/待更新/待重启，2=严重问题或检查失败。
 
-推荐流程：打开菜单后先选 1，并按照最后的“下一步”操作；检查通过时不要再选 2。
+交互菜单只有一个智能操作：先检查；有更新才安装；成功后自动重启；
+没有更新则不修改系统并自动返回菜单。自动化参数模式不会自动重启。
 EOF
 }
 
 if (($# == 0)) && [[ -t 0 ]]; then
   INTERACTIVE_MENU=1
-  printf '\n%sDebian 安全检查与修复 v%s%s\n' "$C_BOLD" "$SCRIPT_VERSION" "$C_RESET"
-  printf '%s\n' '建议第一次使用时先选择 1。只有检查结果建议修复时，才选择 2。'
+  printf '\n%s%sDebian 安全检查与修复 v%s%s\n' "$C_BOLD" "$C_YELLOW" "$SCRIPT_VERSION" "$C_RESET"
+  printf '%s%s选择 1 后会先检查；有更新才安装，成功后自动重启。%s\n' "$C_BOLD" "$C_YELLOW" "$C_RESET"
+  printf '%s%s自动重启会断开当前 SSH；检查或升级失败时不会自动重启。%s\n' "$C_BOLD" "$C_YELLOW" "$C_RESET"
 
   while true; do
-    printf '\n%s\n' '  1) 普通检查（推荐先选，不安装更新）'
-    printf '%s\n' '  2) 检查并修复（安装所有已配置 APT 源的可用更新）'
+    printf '\n%s%s%s\n' "$C_YELLOW" '  1) 智能检查并修复（有更新才安装，成功后自动重启）' "$C_RESET"
     printf '%s\n'   '  0) 退出'
-    printf '\n请选择 [1/2/0]：'
+    printf '\n%s请选择 [1/0]：%s' "$C_YELLOW" "$C_RESET"
 
     if ! read -r MENU_CHOICE; then
       printf '\n未读取到选择，已退出。\n' >&2
@@ -67,29 +70,15 @@ if (($# == 0)) && [[ -t 0 ]]; then
 
     case "$MENU_CHOICE" in
       1)
-        MODE="check"
+        MODE="smart"
         break
-        ;;
-      2)
-        printf '\n修复模式会先检查，然后安装所有已配置 APT 软件源的可用更新（可能包括第三方源），但不会自动重启。\n'
-        printf '确认继续吗？[y/N]：'
-        read -r CONFIRM_FIX || CONFIRM_FIX=""
-        case "$CONFIRM_FIX" in
-          y|Y|yes|YES|Yes)
-            MODE="fix"
-            break
-            ;;
-          *)
-            printf '已取消修复，返回菜单。\n'
-            ;;
-        esac
         ;;
       0)
         printf '已退出，没有修改系统。\n'
         exit 0
         ;;
       *)
-        printf '输入无效，请输入 1、2 或 0。\n' >&2
+        printf '输入无效，请输入 1 或 0。\n' >&2
         ;;
     esac
   done
@@ -107,7 +96,7 @@ while (($#)); do
   shift
 done
 
-if [[ "$MODE" == "fix" && "$REFRESH_APT" -eq 0 ]]; then
+if [[ ("$MODE" == "fix" || "$MODE" == "smart") && "$REFRESH_APT" -eq 0 ]]; then
   printf '%s\n' '错误：--fix 不能与 --no-refresh 同时使用；修复前必须取得最新的软件包索引。' >&2
   exit 2
 fi
@@ -221,7 +210,7 @@ fi
 
 PREFLIGHT_CRITICALS=$CRITICALS
 
-if [[ "$MODE" == "fix" ]]; then
+if [[ "$MODE" == "fix" || "$MODE" == "smart" ]]; then
   section "修复前检查"
   mapfile -t PRE_HELD_PACKAGES < <(apt-mark showhold 2>/dev/null || true)
   mapfile -t PRE_UPGRADABLE < <(apt list --upgradable 2>/dev/null | sed '1{/Listing/d;}' || true)
@@ -240,13 +229,18 @@ if [[ "$MODE" == "fix" ]]; then
 
   section "安装更新"
   if ((EUID != 0)) && ! have sudo; then
-    critical "--fix 需要 root 权限，且系统没有 sudo。请用 root 运行。"
+    critical "安装更新需要 root 权限，且系统没有 sudo。请用 root 运行。"
   elif ((PREFLIGHT_CRITICALS > 0)); then
     critical "修复前检查存在严重问题。为避免错误升级，已停止安装；请先处理上面的严重项。"
+  elif ((${#PRE_UPGRADABLE[@]} == 0)); then
+    ok "没有可更新软件包，已跳过安装。"
   else
-    info "执行 apt-get -y upgrade --with-new-pkgs；不会主动删除软件，也不会自动重启。"
+    info "执行 apt-get -y upgrade --with-new-pkgs；不会主动删除软件包。"
     if run_root apt-get -y upgrade --with-new-pkgs; then
       ok "可安全升级的软件包已处理。"
+      if [[ "$MODE" == "smart" ]]; then
+        SMART_UPDATES_APPLIED=1
+      fi
     else
       critical "升级失败，请检查上面的 APT/dpkg 错误。"
     fi
@@ -457,7 +451,36 @@ else
 fi
 
 if ((PREFLIGHT_CRITICALS > 0)); then
-  printf '%s先不要运行 --fix。%s 系统版本、软件源或 APT 刷新存在严重问题，请先处理上面的“严重”项目。\n' "$C_RED" "$C_RESET"
+  if [[ "$MODE" == "smart" ]]; then
+    printf '%s智能处理已安全停止。%s 系统版本、软件源或 APT 刷新存在严重问题；没有安装更新，也不会自动重启。请先处理上面的“严重”项目。\n' "$C_RED" "$C_RESET"
+  else
+    printf '%s先不要运行 --fix。%s 系统版本、软件源或 APT 刷新存在严重问题，请先处理上面的“严重”项目。\n' "$C_RED" "$C_RESET"
+  fi
+elif [[ "$MODE" == "smart" ]]; then
+  if ((SMART_UPDATES_APPLIED || REBOOT_RECOMMENDED)); then
+    printf '%s更新已成功安装，或新内核正在等待启用。%s\n' "$C_YELLOW" "$C_RESET"
+    printf '%s10 秒后将自动重启，当前 SSH 会断开；按 Ctrl+C 可取消本次重启。%s\n' "$C_YELLOW" "$C_RESET"
+    sleep 10
+    sync
+    if have systemctl && run_root systemctl reboot; then
+      exit 0
+    elif run_root reboot; then
+      exit 0
+    else
+      critical "自动重启失败。请确认有 root 权限后手动运行：$REBOOT_COMMAND"
+    fi
+  elif ((PATCH_RECOMMENDED)); then
+    printf '%s检查后仍有可更新项目，但本次未能安全完成更新。%s 请查看上面的 hold、依赖或 APT 提示；为避免风险，不会自动重启。\n' "$C_RED" "$C_RESET"
+  elif ((CRITICALS > 0)); then
+    printf '%s存在脚本无法自动处理的严重问题。%s 请按上面的提示人工处理；不会自动重启。\n' "$C_RED" "$C_RESET"
+  else
+    printf '%s当前 APT 软件包和已检查补丁均为最新，无需修改系统。%s\n' "$C_GREEN" "$C_RESET"
+    if ((INTERACTIVE_MENU)) && [[ -r /dev/tty ]] && [[ -f "$SCRIPT_PATH" ]]; then
+      info "3 秒后自动返回菜单。"
+      sleep 3
+      exec bash "$SCRIPT_PATH" </dev/tty
+    fi
+  fi
 elif [[ "$MODE" == "check" ]]; then
   if ((PATCH_RECOMMENDED)); then
     printf '%s发现可尝试通过 Debian 更新修复的问题。%s 下一步运行：\n' "$C_YELLOW" "$C_RESET"

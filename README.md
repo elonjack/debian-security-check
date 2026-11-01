@@ -2,7 +2,7 @@
 
 面向 Debian 12（Bookworm）和 Debian 13（Trixie）的安全检查与保守更新脚本。
 
-脚本默认只刷新 APT 软件包索引并检查系统，不安装或删除软件。`--fix` 模式会先进行预检，只有在系统版本、安全软件源和 APT 索引均无严重问题时，才安装仓库中已经提供的更新。
+交互菜单提供一个“小白智能模式”：先检查，只有发现可安装更新且预检通过时才更新；更新成功后自动重启。没有更新时不会修改系统，并自动返回菜单。高级用户仍可用 `--check` / `--fix` 参数执行不会自动重启的检查或更新。
 
 ## 先获取脚本
 
@@ -11,7 +11,7 @@
 本项目使用公开 GitHub 仓库。在 Debian VPS 运行下面这一条命令即可：
 
 ```bash
-curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.2.5/install.sh | bash
+curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.3.0/install.sh | bash
 ```
 
 安装器会自动：
@@ -19,7 +19,7 @@ curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v
 1. 从最新 GitHub Release 下载正式脚本和 `SHA256SUMS`。
 2. 校验脚本 SHA-256；不一致就停止，不会执行。
 3. 安装到 `$HOME/debian-security-check/`。
-4. 恢复终端输入并打开 `1/2/0` 中文菜单。
+4. 恢复终端输入并打开 `1/0` 中文菜单。
 
 这条命令的引导安装器本身来自公开 Release。安全要求更高时，应使用下一节的手动下载方法，先把文件保存下来检查，再执行。
 
@@ -39,9 +39,9 @@ sudo bash debian-security-check.sh
 
 ```bash
 curl -fL -o debian-security-check.sh \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.2.5/debian-security-check.sh
+  https://github.com/elonjack/debian-security-check/releases/download/v1.3.0/debian-security-check.sh
 curl -fL -o SHA256SUMS \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.2.5/SHA256SUMS
+  https://github.com/elonjack/debian-security-check/releases/download/v1.3.0/SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
 
@@ -68,7 +68,8 @@ sudo bash debian-security-check.sh
 - 识别容器、第三方内核、自编译内核和缺失的内核元包
 - 检查是否需要重启，以及是否启用了 `unattended-upgrades`
 - 如果已安装 `debsecan`，列出已有修复可安装的漏洞包
-- `--fix` 使用不会主动删除软件包的保守更新方式
+- 交互模式先检查，有更新才安装，成功后自动重启
+- `--fix` 使用不会主动删除软件包的保守更新方式，且不会自动重启
 
 ## 小白推荐流程
 
@@ -81,29 +82,30 @@ sudo bash debian-security-check.sh
 菜单内容：
 
 ```text
-1) 普通检查（推荐先选，不安装更新）
-2) 检查并修复（安装所有已配置 APT 源的可用更新）
+1) 智能检查并修复（有更新才安装，成功后自动重启）
 0) 退出
 ```
 
-第一次使用始终先选择 `1`。只有检查结果明确建议修复时，才重新运行脚本并选择 `2`。
+选择 `1` 即可完成“检查 → 必要时更新 → 必要时重启”的流程，不再需要把检查结果发给别人判断，也不用再次选择修复选项。
 
-不要一上来就运行修复模式。正确顺序如下：
+执行流程如下：
 
 ```text
-普通检查
-   ├─ 检查通过、没有可安装更新 → 到此结束，不需要 --fix
-   ├─ 提示可以通过 Debian 更新修复 → 运行 --fix
-   │                                  ├─ 提示需要重启 → 重启
-   │                                  └─ 不需要重启 → 修复结束
-   └─ 软件源/系统版本等严重错误 → 先人工处理，不要盲目运行 --fix
+选择 1
+   ├─ 先检查 Debian、security 源并刷新 APT 索引
+   ├─ 没有可安装更新、无需重启 → 不修改系统，3 秒后自动返回菜单
+   ├─ 有可安装更新且预检通过 → 安装更新
+   │                              ├─ 安装成功 → 提示 10 秒后自动重启，SSH 会断开
+   │                              └─ 安装失败 → 不重启，保留错误信息
+   ├─ 新内核已安装但尚未启用 → 提示 10 秒后自动重启
+   └─ 系统版本、软件源或 APT 有严重错误 → 不安装、不重启，提示人工处理
 
-修复或重启完成后 → 再运行一次普通检查确认
+服务器重启恢复后 → 再运行脚本并选择 1 复查
 ```
 
-脚本最后会显示“下一步”，直接告诉你现在应该停止、运行 `--fix`、重启，还是先人工处理严重问题。
+自动重启前有 10 秒提示时间，可按 `Ctrl+C` 取消本次重启。自动重启会断开当前 SSH，请确认 VPS 有可用备份、快照或带外控制台。
 
-### 第一步：始终先检查
+### 第一步：选择智能检查并修复
 
 下载后先检查：
 
@@ -114,56 +116,37 @@ sudo bash debian-security-check.sh
 然后选择：
 
 ```text
-1) 普通检查
+1) 智能检查并修复
 ```
 
-如果最后明确显示“当前无需运行 `--fix`”，说明没有发现可以通过更新修复的问题，到这里就结束了。
+脚本始终先检查。若没有更新，它不会执行升级，也不会重启；若有更新，只有在系统版本、安全软件源和 APT 索引检查均无严重问题时，才执行 `apt-get -y upgrade --with-new-pkgs`。
 
-### 第二步：只有检查建议时才修复
-
-只有普通检查明确建议修复时，才再次运行：
-
-```bash
-sudo bash debian-security-check.sh
-```
-
-然后选择：
-
-```text
-2) 检查并修复
-```
-
-`--fix` 的执行顺序是：
+智能模式的更新顺序是：
 
 1. 检查 Debian 版本、支持状态和 security 软件源。
 2. 执行 `apt-get update`，要求所有软件源成功刷新。
-3. 显示修复前的 hold 包和待更新数量。
-4. 仅在预检没有严重问题时执行 `apt-get -y upgrade --with-new-pkgs`。
+3. 显示 hold 包和待更新数量。
+4. 没有待更新包时跳过安装；有更新且预检通过时执行保守升级。
 5. 重新检查待更新包、漏洞状态、运行中内核和重启需求。
+6. 更新成功或新内核等待启用时自动重启；检查/升级失败时绝不自动重启。
 
-脚本不会自动解除 hold、不会运行会主动删除包的 `dist-upgrade/full-upgrade`，也不会自动重启服务器。
+脚本不会自动解除 hold，也不会运行会主动删除包的 `dist-upgrade/full-upgrade`。
 
 修复模式更新的是所有已配置 APT 软件源中的可用包，不仅是 Debian security 仓库；如果系统配置了第三方软件源，对应软件也可能被更新。
 
-### 第三步：根据修复结果决定是否重启
+### 第二步：重启后复查
 
-如果脚本提示需要重启：
-
-```bash
-sudo reboot
-```
-
-服务器恢复后，再运行脚本并选择 `1` 普通检查：
+服务器恢复后，再运行脚本并选择 `1`：
 
 ```bash
 sudo bash debian-security-check.sh
 ```
 
-如果普通检查说明无需运行 `--fix`，流程才算完成。
+如果显示当前没有可安装更新，并自动返回菜单，说明本次 APT 更新流程已完成。它仍不能证明所有第三方软件、业务代码或尚无补丁的漏洞都已解决。
 
 ## 自动化和批量服务器
 
-菜单适合人工操作。Ansible、定时任务或批量 SSH 不能等待菜单输入，因此仍然保留参数模式；但修复会更新软件并可能重启服务，应先在测试机验证：
+菜单适合人工操作。Ansible、定时任务或批量 SSH 不能等待菜单输入，因此仍然保留参数模式；参数模式不会自动重启服务器，但更新软件时仍可能重启部分服务，应先在测试机验证：
 
 ```bash
 # 直接检查，不显示菜单
@@ -174,6 +157,8 @@ sudo bash debian-security-check.sh --fix
 ```
 
 所以菜单和参数并不冲突：普通用户使用菜单，自动化运维使用参数。
+
+`--check` 只检查；`--fix` 预检并安装更新。两者都不会自动执行 `reboot`，自动重启只属于人工明确选择的交互菜单智能模式。
 
 离线检查（结果可能不是最新）：
 

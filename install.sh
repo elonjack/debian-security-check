@@ -4,7 +4,7 @@
 set -euo pipefail
 
 REPOSITORY="elonjack/debian-security-check"
-RELEASE_TAG="v1.2.5"
+RELEASE_TAG="v1.3.0"
 BASE_URL="${DEBIAN_SECURITY_CHECK_BASE_URL:-https://github.com/${REPOSITORY}/releases/download/${RELEASE_TAG}}"
 INSTALL_DIR="${DEBIAN_SECURITY_CHECK_DIR:-${HOME}/debian-security-check}"
 PAYLOAD="debian-security-check.sh"
