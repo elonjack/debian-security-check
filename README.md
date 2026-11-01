@@ -17,6 +17,22 @@
 
 ## 小白推荐流程
 
+运行一个命令即可打开中文菜单：
+
+```bash
+sudo bash debian-security-check.sh
+```
+
+菜单内容：
+
+```text
+1) 普通检查（推荐先选，不安装更新）
+2) 检查并修复（会安装 Debian 可用更新）
+0) 退出
+```
+
+第一次使用始终先选择 `1`。只有检查结果明确建议修复时，才重新运行脚本并选择 `2`。
+
 不要一上来就运行修复模式。正确顺序如下：
 
 ```text
@@ -40,14 +56,26 @@
 sudo bash debian-security-check.sh
 ```
 
+然后选择：
+
+```text
+1) 普通检查
+```
+
 如果最后明确显示“当前无需运行 `--fix`”，说明没有发现可以通过更新修复的问题，到这里就结束了。
 
 ### 第二步：只有检查建议时才修复
 
-只有普通检查明确建议运行 `--fix` 时，才执行：
+只有普通检查明确建议修复时，才再次运行：
 
 ```bash
-sudo bash debian-security-check.sh --fix
+sudo bash debian-security-check.sh
+```
+
+然后选择：
+
+```text
+2) 检查并修复
 ```
 
 `--fix` 的执行顺序是：
@@ -68,13 +96,27 @@ sudo bash debian-security-check.sh --fix
 sudo reboot
 ```
 
-服务器恢复后，再执行一次普通检查：
+服务器恢复后，再运行脚本并选择 `1` 普通检查：
 
 ```bash
 sudo bash debian-security-check.sh
 ```
 
 如果普通检查说明无需运行 `--fix`，流程才算完成。
+
+## 自动化和批量服务器
+
+菜单适合人工操作。Ansible、定时任务或批量 SSH 不能等待人工输入，因此仍然保留参数模式：
+
+```bash
+# 直接检查，不显示菜单
+sudo bash debian-security-check.sh --check
+
+# 直接预检并安装更新，不显示菜单
+sudo bash debian-security-check.sh --fix
+```
+
+所以菜单和参数并不冲突：普通用户使用菜单，自动化运维使用参数。
 
 离线检查（结果可能不是最新）：
 

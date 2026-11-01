@@ -5,8 +5,9 @@
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 MODE="check"
+INTERACTIVE_MENU=0
 REFRESH_APT=1
 WARNINGS=0
 CRITICALS=0
@@ -28,23 +29,72 @@ fi
 usage() {
   cat <<'EOF'
 用法：
-  sudo bash debian-security-check.sh              # 第一步：检查，不安装软件
-  sudo bash debian-security-check.sh --fix        # 第二步：仅在检查建议时安装更新
+  sudo bash debian-security-check.sh              # 推荐：打开交互菜单
+  sudo bash debian-security-check.sh --check      # 自动化：直接检查
+  sudo bash debian-security-check.sh --fix        # 自动化：直接检查并安装更新
   bash debian-security-check.sh --no-refresh      # 离线检查，不刷新 APT 索引
 
 选项：
+  --check       直接运行普通检查，不显示菜单
   --fix         执行 apt-get upgrade --with-new-pkgs
   --no-refresh  不执行 apt-get update（结果可能不是最新）
   -h, --help    显示帮助
 
 退出码：0=未发现需处理项，1=有警告/待更新/待重启，2=严重问题或检查失败。
 
-推荐流程：先运行普通检查，并按照最后的“下一步”操作；检查通过时无需运行 --fix。
+推荐流程：打开菜单后先选 1，并按照最后的“下一步”操作；检查通过时不要再选 2。
 EOF
 }
 
+if (($# == 0)) && [[ -t 0 ]]; then
+  INTERACTIVE_MENU=1
+  printf '\n%sDebian 安全检查与修复%s\n' "$C_BOLD" "$C_RESET"
+  printf '%s\n' '建议第一次使用时先选择 1。只有检查结果建议修复时，才选择 2。'
+
+  while true; do
+    printf '\n%s\n' '  1) 普通检查（推荐先选，不安装更新）'
+    printf '%s\n'   '  2) 检查并修复（会安装 Debian 可用更新）'
+    printf '%s\n'   '  0) 退出'
+    printf '\n请选择 [1/2/0]：'
+
+    if ! read -r MENU_CHOICE; then
+      printf '\n未读取到选择，已退出。\n' >&2
+      exit 2
+    fi
+
+    case "$MENU_CHOICE" in
+      1)
+        MODE="check"
+        break
+        ;;
+      2)
+        printf '\n修复模式会先检查，检查通过后安装可用更新，但不会自动重启。\n'
+        printf '确认继续吗？[y/N]：'
+        read -r CONFIRM_FIX || CONFIRM_FIX=""
+        case "$CONFIRM_FIX" in
+          y|Y|yes|YES|Yes)
+            MODE="fix"
+            break
+            ;;
+          *)
+            printf '已取消修复，返回菜单。\n'
+            ;;
+        esac
+        ;;
+      0)
+        printf '已退出，没有修改系统。\n'
+        exit 0
+        ;;
+      *)
+        printf '输入无效，请输入 1、2 或 0。\n' >&2
+        ;;
+    esac
+  done
+fi
+
 while (($#)); do
   case "$1" in
+    --check) MODE="check" ;;
     --fix) MODE="fix" ;;
     --no-refresh) REFRESH_APT=0 ;;
     -h|--help) usage; exit 0 ;;
@@ -347,7 +397,12 @@ if ((PREFLIGHT_CRITICALS > 0)); then
 elif [[ "$MODE" == "check" ]]; then
   if ((PATCH_RECOMMENDED)); then
     printf '%s发现可尝试通过 Debian 更新修复的问题。%s 下一步运行：\n' "$C_YELLOW" "$C_RESET"
-    printf '  sudo bash %q --fix\n' "$SCRIPT_NAME"
+    if ((INTERACTIVE_MENU)); then
+      printf '  sudo bash %q\n' "$SCRIPT_NAME"
+      printf '然后在菜单中选择 2“检查并修复”。\n'
+    else
+      printf '  sudo bash %q --fix\n' "$SCRIPT_NAME"
+    fi
     printf '修复结束后按照提示决定是否重启；之后再运行一次普通检查。\n'
   elif ((REBOOT_RECOMMENDED)); then
     printf '%s更新可能已经安装，目前只需要先重启：%s\n' "$C_YELLOW" "$C_RESET"

@@ -16,3 +16,15 @@ jobs:
         run: bash -n debian-security-check.sh
       - name: ShellCheck
         run: shellcheck --severity=warning debian-security-check.sh
+      - name: Help smoke test
+        run: bash debian-security-check.sh --help
+      - name: Interactive menu exit smoke test
+        run: |
+          printf '0\n' | script -qec 'bash debian-security-check.sh' /dev/null | grep -q '已退出，没有修改系统'
+      - name: Reject unsafe option combination
+        run: |
+          set +e
+          bash debian-security-check.sh --fix --no-refresh
+          status=$?
+          set -e
+          test "$status" -eq 2
