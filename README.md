@@ -6,6 +6,25 @@
 
 ## 先获取脚本
 
+### 一条命令安装并启动（推荐）
+
+本项目使用公开 GitHub 仓库。在 Debian VPS 运行下面这一条命令即可：
+
+```bash
+curl -fsSL https://github.com/elonjack/debian-security-check/releases/latest/download/install.sh | bash
+```
+
+安装器会自动：
+
+1. 从最新 GitHub Release 下载正式脚本和 `SHA256SUMS`。
+2. 校验脚本 SHA-256；不一致就停止，不会执行。
+3. 安装到 `$HOME/debian-security-check/`。
+4. 恢复终端输入并打开 `1/2/0` 中文菜单。
+
+这条命令的引导安装器本身来自公开 Release。安全要求更高时，应使用下一节的手动下载方法，先把文件保存下来检查，再执行。
+
+### 手动下载并校验
+
 仅输入下面这条命令并不能下载脚本：
 
 ```bash
@@ -39,23 +58,6 @@ sudo bash debian-security-check.sh
 ```
 
 不要使用未经校验的 `curl ... | bash`，因为这样会把网络返回内容直接交给 root 执行，也不方便先阅读脚本。
-
-### 以后改回私有仓库
-
-改回私有仓库后，未登录 GitHub 的 VPS 使用上述 `curl` 会返回 `404`。届时可以在已经登录 GitHub CLI 的电脑下载：
-
-```bash
-gh release download v1.2.1 \
-  --repo elonjack/debian-security-check \
-  --pattern debian-security-check.sh \
-  --pattern SHA256SUMS
-```
-
-然后上传到 VPS：
-
-```bash
-scp debian-security-check.sh SHA256SUMS root@你的VPS地址:/root/
-```
 
 ## 功能
 
