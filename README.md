@@ -14,9 +14,35 @@ sudo bash debian-security-check.sh
 
 它只会执行当前目录中已经存在的 `debian-security-check.sh`。必须先从 GitHub Release 下载或上传到 VPS。
 
-### 私有仓库的下载方法
+### 当前公开仓库：直接在 VPS 下载
 
-本仓库当前是私有仓库，未登录 GitHub 的 VPS 直接使用 `curl` 会得到 `404`。可以先在已经登录 GitHub CLI 的电脑上下载 Release：
+本仓库当前是公开仓库，可以直接在 VPS 下载最新版 Release：
+
+```bash
+curl -fL -o debian-security-check.sh \
+  https://github.com/elonjack/debian-security-check/releases/latest/download/debian-security-check.sh
+curl -fL -o SHA256SUMS \
+  https://github.com/elonjack/debian-security-check/releases/latest/download/SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+确认输出 `debian-security-check.sh: OK` 后再运行。使用 root 登录 VPS 时：
+
+```bash
+bash debian-security-check.sh
+```
+
+使用具有 sudo 权限的普通用户时：
+
+```bash
+sudo bash debian-security-check.sh
+```
+
+不要使用未经校验的 `curl ... | bash`，因为这样会把网络返回内容直接交给 root 执行，也不方便先阅读脚本。
+
+### 以后改回私有仓库
+
+改回私有仓库后，未登录 GitHub 的 VPS 使用上述 `curl` 会返回 `404`。届时可以在已经登录 GitHub CLI 的电脑下载：
 
 ```bash
 gh release download v1.2.1 \
@@ -30,29 +56,6 @@ gh release download v1.2.1 \
 ```bash
 scp debian-security-check.sh SHA256SUMS root@你的VPS地址:/root/
 ```
-
-登录 VPS 后校验并运行：
-
-```bash
-cd /root
-sha256sum -c SHA256SUMS
-sudo bash debian-security-check.sh
-```
-
-### 如果以后将仓库设为公开
-
-公开仓库可以直接在 VPS 下载最新版 Release：
-
-```bash
-curl -fL -o debian-security-check.sh \
-  https://github.com/elonjack/debian-security-check/releases/latest/download/debian-security-check.sh
-curl -fL -o SHA256SUMS \
-  https://github.com/elonjack/debian-security-check/releases/latest/download/SHA256SUMS
-sha256sum -c SHA256SUMS
-sudo bash debian-security-check.sh
-```
-
-不要使用未经校验的 `curl ... | bash`，因为这样会把网络返回内容直接交给 root 执行，也不方便先阅读脚本。
 
 ## 功能
 
