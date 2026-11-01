@@ -11,7 +11,7 @@
 本项目使用公开 GitHub 仓库。在 Debian VPS 运行下面这一条命令即可：
 
 ```bash
-curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.2.4/install.sh | bash
+curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.2.5/install.sh | bash
 ```
 
 安装器会自动：
@@ -39,9 +39,9 @@ sudo bash debian-security-check.sh
 
 ```bash
 curl -fL -o debian-security-check.sh \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.2.4/debian-security-check.sh
+  https://github.com/elonjack/debian-security-check/releases/download/v1.2.5/debian-security-check.sh
 curl -fL -o SHA256SUMS \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.2.4/SHA256SUMS
+  https://github.com/elonjack/debian-security-check/releases/download/v1.2.5/SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
 

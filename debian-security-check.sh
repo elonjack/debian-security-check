@@ -5,7 +5,7 @@
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="1.2.4"
+SCRIPT_VERSION="1.2.5"
 MODE="check"
 INTERACTIVE_MENU=0
 REFRESH_APT=1
@@ -14,6 +14,8 @@ CRITICALS=0
 PATCH_RECOMMENDED=0
 REBOOT_RECOMMENDED=0
 PREFLIGHT_CRITICALS=0
+RUNNING_KERNEL_VULNERABLE=0
+KERNEL_UPDATE_NEEDED=0
 
 if [[ -t 1 && "${NO_COLOR:-}" == "" ]]; then
   C_RED=$'\033[31m'
@@ -347,7 +349,8 @@ else
       if ((VERSION_IS_FIXED)); then
         ok "运行中内核已达到 CVE-2026-98432 修复线（Debian 修复版本：$FIXED_DEBIAN）。"
       else
-        PATCH_RECOMMENDED=1
+        RUNNING_KERNEL_VULNERABLE=1
+        KERNEL_UPDATE_NEEDED=1
         critical "运行中内核仍低于修复线 $FIXED_DEBIAN；更新内核后必须重启。"
       fi
     fi
@@ -360,6 +363,39 @@ if [[ -n "$INSTALLED_KERNELS" ]]; then
   sed 's/^/  /' <<<"$INSTALLED_KERNELS"
 else
   printf '  （未找到 Debian linux-image 内核包）\n'
+fi
+
+INSTALLED_FIXED_KERNEL=0
+while IFS='|' read -r STATUS_ABBR PACKAGE_NAME INSTALLED_SOURCE _INSTALLED_SOURCE_VERSION; do
+  [[ "$STATUS_ABBR" == ii* ]] || continue
+  case "$INSTALLED_SOURCE" in
+    linux|linux-6.12|linux-signed-amd64|linux-signed-arm64|linux-signed-i386) ;;
+    *) continue ;;
+  esac
+
+  PACKAGE_NAME="${PACKAGE_NAME%%:*}"
+  INSTALLED_UPSTREAM="$(sed -nE 's/^linux-image-([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' <<<"$PACKAGE_NAME")"
+  [[ -n "$INSTALLED_UPSTREAM" ]] || continue
+
+  case "$VERSION:$INSTALLED_UPSTREAM" in
+    13:6.12.*)
+      if dpkg --compare-versions "$INSTALLED_UPSTREAM" ge "6.12.113"; then INSTALLED_FIXED_KERNEL=1; fi
+      ;;
+    12:6.1.*)
+      if dpkg --compare-versions "$INSTALLED_UPSTREAM" ge "6.1.190"; then INSTALLED_FIXED_KERNEL=1; fi
+      ;;
+    12:6.12.*)
+      if dpkg --compare-versions "$INSTALLED_UPSTREAM" ge "6.12.113"; then INSTALLED_FIXED_KERNEL=1; fi
+      ;;
+  esac
+done < <(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${source:Package}|${source:Version}\n' 'linux-image-[0-9]*' 2>/dev/null || true)
+
+if ((RUNNING_KERNEL_VULNERABLE && INSTALLED_FIXED_KERNEL)); then
+  KERNEL_UPDATE_NEEDED=0
+  REBOOT_RECOMMENDED=1
+  warn "修复内核已经安装，但当前仍在运行旧内核；现在需要重启，不需要再次安装内核更新。"
+elif ((KERNEL_UPDATE_NEEDED)); then
+  PATCH_RECOMMENDED=1
 fi
 
 META_KERNELS="$(dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package} ${Version}\n' 'linux-image-*' 2>/dev/null | awk '$1 ~ /^ii/ && $2 ~ /^linux-image-(amd64|cloud-amd64|rt-amd64|arm64|cloud-arm64|armmp|powerpc64le|riscv64|s390x)(:[^ ]+)?$/ {print $2, $3}' | sort -u || true)"
@@ -411,7 +447,14 @@ else
 fi
 
 section "下一步"
-SCRIPT_NAME="${0##*/}"
+SCRIPT_PATH="$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")"
+if ((EUID == 0)); then
+  BASH_COMMAND_PREFIX="bash"
+  REBOOT_COMMAND="reboot"
+else
+  BASH_COMMAND_PREFIX="sudo bash"
+  REBOOT_COMMAND="sudo reboot"
+fi
 
 if ((PREFLIGHT_CRITICALS > 0)); then
   printf '%s先不要运行 --fix。%s 系统版本、软件源或 APT 刷新存在严重问题，请先处理上面的“严重”项目。\n' "$C_RED" "$C_RESET"
@@ -419,15 +462,15 @@ elif [[ "$MODE" == "check" ]]; then
   if ((PATCH_RECOMMENDED)); then
     printf '%s发现可尝试通过 Debian 更新修复的问题。%s 下一步运行：\n' "$C_YELLOW" "$C_RESET"
     if ((INTERACTIVE_MENU)); then
-      printf '  sudo bash %q\n' "$SCRIPT_NAME"
+      printf '  %s %q\n' "$BASH_COMMAND_PREFIX" "$SCRIPT_PATH"
       printf '然后在菜单中选择 2“检查并修复”。\n'
     else
-      printf '  sudo bash %q --fix\n' "$SCRIPT_NAME"
+      printf '  %s %q --fix\n' "$BASH_COMMAND_PREFIX" "$SCRIPT_PATH"
     fi
     printf '修复结束后按照提示决定是否重启；之后再运行一次普通检查。\n'
   elif ((REBOOT_RECOMMENDED)); then
     printf '%s更新可能已经安装，目前只需要先重启：%s\n' "$C_YELLOW" "$C_RESET"
-    printf '  sudo reboot\n'
+    printf '  %s\n' "$REBOOT_COMMAND"
     printf '服务器恢复后，再运行一次普通检查。此时无需先运行 --fix。\n'
   elif ((CRITICALS > 0)); then
     printf '%s存在无法由本脚本自动判断或修复的问题。%s 请按上面的严重提示人工处理，不要把运行 --fix 当成已经修好。\n' "$C_RED" "$C_RESET"
@@ -437,9 +480,9 @@ elif [[ "$MODE" == "check" ]]; then
 else
   if ((REBOOT_RECOMMENDED)); then
     printf '%s补丁已经安装或内核已经更新，下一步需要重启：%s\n' "$C_YELLOW" "$C_RESET"
-    printf '  sudo reboot\n'
+    printf '  %s\n' "$REBOOT_COMMAND"
     printf '服务器恢复后，再运行：\n'
-    printf '  sudo bash %q\n' "$SCRIPT_NAME"
+    printf '  %s %q\n' "$BASH_COMMAND_PREFIX" "$SCRIPT_PATH"
   elif ((PATCH_RECOMMENDED)); then
     printf '%s修复后仍有可更新项目或运行内核仍有风险。%s 不要反复盲目运行 --fix，请查看上面的 hold、依赖或内核提示。\n' "$C_RED" "$C_RESET"
   elif ((CRITICALS > 0)); then
