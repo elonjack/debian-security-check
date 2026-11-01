@@ -19,7 +19,7 @@ jobs:
       - name: Help smoke test
         run: bash debian-security-check.sh --help
       - name: Version smoke test
-        run: test "$(bash debian-security-check.sh --version)" = "1.2.2"
+        run: test "$(bash debian-security-check.sh --version)" = "1.2.3"
       - name: Interactive menu exit smoke test
         run: |
           printf '0\n' | script -qec 'bash debian-security-check.sh' /dev/null | grep -q '已退出，没有修改系统'

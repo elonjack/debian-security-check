@@ -5,7 +5,7 @@
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="1.2.2"
+SCRIPT_VERSION="1.2.3"
 MODE="check"
 INTERACTIVE_MENU=0
 REFRESH_APT=1

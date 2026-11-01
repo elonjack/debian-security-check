@@ -34,6 +34,11 @@ mkdir -p "$INSTALL_DIR"
 install -m 0755 "$TMP_DIR/$PAYLOAD" "$INSTALL_DIR/$PAYLOAD"
 install -m 0644 "$TMP_DIR/$CHECKSUMS" "$INSTALL_DIR/$CHECKSUMS"
 
+# exec does not trigger an EXIT trap, so remove temporary files before launching.
+rm -f -- "$TMP_DIR/$PAYLOAD" "$TMP_DIR/$CHECKSUMS"
+rmdir -- "$TMP_DIR"
+trap - EXIT
+
 printf '已安装到：%s\n' "$INSTALL_DIR/$PAYLOAD"
 
 if [[ "${DEBIAN_SECURITY_CHECK_INSTALL_ONLY:-0}" == "1" ]]; then
