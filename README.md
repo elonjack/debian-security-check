@@ -1,0 +1,87 @@
+# Debian Security Check
+
+面向 Debian 12（Bookworm）和 Debian 13（Trixie）的安全检查与保守更新脚本。
+
+脚本默认只刷新 APT 软件包索引并检查系统，不安装或删除软件。`--fix` 模式会先进行预检，只有在系统版本、安全软件源和 APT 索引均无严重问题时，才安装仓库中已经提供的更新。
+
+## 功能
+
+- 检查 Debian 版本、架构和支持状态
+- 检查 `bookworm-security` / `trixie-security` 软件源
+- 检查待更新软件包和被 hold 的软件包
+- 检查 `CVE-2026-98432` 对当前运行内核的影响
+- 识别容器、第三方内核、自编译内核和缺失的内核元包
+- 检查是否需要重启，以及是否启用了 `unattended-upgrades`
+- 如果已安装 `debsecan`，列出已有修复可安装的漏洞包
+- `--fix` 使用不会主动删除软件包的保守更新方式
+
+## 使用方法
+
+下载后先检查：
+
+```bash
+sudo bash debian-security-check.sh
+```
+
+检查并安装当前 Debian 软件源中可用的更新：
+
+```bash
+sudo bash debian-security-check.sh --fix
+```
+
+`--fix` 的执行顺序是：
+
+1. 检查 Debian 版本、支持状态和 security 软件源。
+2. 执行 `apt-get update`，要求所有软件源成功刷新。
+3. 显示修复前的 hold 包和待更新数量。
+4. 仅在预检没有严重问题时执行 `apt-get upgrade --with-new-pkgs`。
+5. 重新检查待更新包、漏洞状态、运行中内核和重启需求。
+
+脚本不会自动解除 hold、不会运行会主动删除包的 `dist-upgrade/full-upgrade`，也不会自动重启服务器。
+
+离线检查（结果可能不是最新）：
+
+```bash
+bash debian-security-check.sh --no-refresh
+```
+
+为了防止使用过期索引，`--fix` 不能和 `--no-refresh` 同时使用。
+
+## 这是否算“打补丁”
+
+算。Debian 通常把安全修复回移植到稳定版软件包中。安装 Debian security 仓库提供的新软件包，就是应用 Debian 官方安全补丁，不要求软件主版本发生变化。
+
+但是，脚本不能保证修复“所有最新漏洞”：
+
+- Debian 尚未发布修复的软件漏洞，只能报告或等待上游补丁。
+- 第三方仓库、手工安装的软件、容器镜像和业务代码不一定由 APT 覆盖。
+- Proxmox、云厂商或自编译内核必须使用对应提供方的补丁。
+- 内核更新安装后必须重启；容器内更新不能替代宿主机内核更新。
+- 被 hold、依赖冲突或需要删除旧包才能升级的软件会被保留，脚本会在最终结果中提示。
+- 补丁不会证明机器过去没有被入侵；发现入侵迹象时应隔离、保留证据并从可信镜像重建。
+
+建议额外安装 Debian 官方扫描工具：
+
+```bash
+sudo apt-get install debsecan debian-security-support needrestart unattended-upgrades
+```
+
+## `CVE-2026-98432`
+
+脚本按照 Debian Security Tracker 公布的修复线检查当前正在运行的内核：
+
+- Debian 13：`linux` 6.12.113-1 或更高
+- Debian 12 默认 6.1 内核：`linux` 6.1.190-1 或更高
+- Debian 12 的 6.12 内核：`linux-6.12` 6.12.113-1~deb12u1 或更高
+
+参考：[Debian Security Tracker: CVE-2026-98432](https://security-tracker.debian.org/tracker/CVE-2026-98432)
+
+## 退出码
+
+- `0`：未发现需要立即处理的问题
+- `1`：存在警告、待更新软件包或待重启状态
+- `2`：存在严重问题，或关键检查失败
+
+## 安全建议
+
+先在一台同类型测试机或低风险服务器运行，再按业务批次部署。生产服务器更新内核前，应确认存在可用快照、备份和带外控制台。
