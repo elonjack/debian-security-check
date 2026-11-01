@@ -5,11 +5,14 @@
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.1.0"
 MODE="check"
 REFRESH_APT=1
 WARNINGS=0
 CRITICALS=0
+PATCH_RECOMMENDED=0
+REBOOT_RECOMMENDED=0
+PREFLIGHT_CRITICALS=0
 
 if [[ -t 1 && "${NO_COLOR:-}" == "" ]]; then
   C_RED=$'\033[31m'
@@ -25,8 +28,8 @@ fi
 usage() {
   cat <<'EOF'
 用法：
-  sudo bash debian-security-check.sh              # 检查，刷新 APT 索引但不安装软件
-  sudo bash debian-security-check.sh --fix        # 安装可更新包，不删除软件、不自动重启
+  sudo bash debian-security-check.sh              # 第一步：检查，不安装软件
+  sudo bash debian-security-check.sh --fix        # 第二步：仅在检查建议时安装更新
   bash debian-security-check.sh --no-refresh      # 离线检查，不刷新 APT 索引
 
 选项：
@@ -35,6 +38,8 @@ usage() {
   -h, --help    显示帮助
 
 退出码：0=未发现需处理项，1=有警告/待更新/待重启，2=严重问题或检查失败。
+
+推荐流程：先运行普通检查，并按照最后的“下一步”操作；检查通过时无需运行 --fix。
 EOF
 }
 
@@ -160,6 +165,8 @@ else
   warn "已跳过 apt-get update；后续结果可能过期。"
 fi
 
+PREFLIGHT_CRITICALS=$CRITICALS
+
 if [[ "$MODE" == "fix" ]]; then
   section "修复前检查"
   mapfile -t PRE_HELD_PACKAGES < <(apt-mark showhold 2>/dev/null || true)
@@ -180,7 +187,7 @@ if [[ "$MODE" == "fix" ]]; then
   section "安装更新"
   if ((EUID != 0)) && ! have sudo; then
     critical "--fix 需要 root 权限，且系统没有 sudo。请用 root 运行。"
-  elif ((CRITICALS > 0)); then
+  elif ((PREFLIGHT_CRITICALS > 0)); then
     critical "修复前检查存在严重问题。为避免错误升级，已停止安装；请先处理上面的严重项。"
   else
     info "执行 apt-get upgrade --with-new-pkgs；不会主动删除软件，也不会自动重启。"
@@ -202,6 +209,7 @@ fi
 
 mapfile -t UPGRADABLE < <(apt list --upgradable 2>/dev/null | sed '1{/Listing/d;}' || true)
 if ((${#UPGRADABLE[@]})); then
+  PATCH_RECOMMENDED=1
   warn "还有 ${#UPGRADABLE[@]} 个软件包可更新。"
   printf '%s\n' "${UPGRADABLE[@]:0:20}" | sed 's/^/  /'
   if ((${#UPGRADABLE[@]} > 20)); then
@@ -215,6 +223,7 @@ if have debsecan && [[ -n "$CODENAME" ]]; then
   info "运行 debsecan，检查已有修复可安装的漏洞包……"
   if DEBSECAN_OUTPUT="$(debsecan --suite "$CODENAME" --format packages --only-fixed 2>/dev/null | sort -u)"; then
     if [[ -n "$DEBSECAN_OUTPUT" ]]; then
+    PATCH_RECOMMENDED=1
     DEBSECAN_COUNT="$(wc -l <<<"$DEBSECAN_OUTPUT" | tr -d ' ')"
     warn "debsecan 报告 $DEBSECAN_COUNT 个存在可用安全修复的软件包："
     sed -n '1,30p' <<<"$DEBSECAN_OUTPUT" | sed 's/^/  /'
@@ -268,6 +277,7 @@ else
     elif dpkg --compare-versions "$UPSTREAM_VERSION" ge "$FIXED_UPSTREAM"; then
       ok "运行中内核已达到 CVE-2026-98432 修复线（Debian 修复版本：$FIXED_DEBIAN）。"
     else
+      PATCH_RECOMMENDED=1
       critical "运行中内核仍低于修复线 $FIXED_DEBIAN；更新内核后必须重启。"
     fi
   fi
@@ -290,6 +300,7 @@ else
 fi
 
 if [[ -e /run/reboot-required ]]; then
+  REBOOT_RECOMMENDED=1
   warn "系统明确要求重启：/run/reboot-required 已存在。"
   if [[ -r /run/reboot-required.pkgs ]]; then
     sed 's/^/  触发包：/' /run/reboot-required.pkgs
@@ -298,6 +309,7 @@ elif have needrestart; then
   if run_root needrestart -p -k >/dev/null 2>&1; then
     ok "needrestart 未报告过期的运行中内核。"
   else
+    REBOOT_RECOMMENDED=1
     warn "needrestart 认为当前运行内核可能已过期，请安排重启。"
   fi
 else
@@ -320,12 +332,51 @@ fi
 
 section "结论"
 if ((CRITICALS > 0)); then
-  printf '%s发现 %d 个严重问题、%d 个警告。请优先处理严重项。%s\n' "$C_RED" "$CRITICALS" "$WARNINGS" "$C_RESET"
-  exit 2
+  printf '%s发现 %d 个严重问题、%d 个警告。%s\n' "$C_RED" "$CRITICALS" "$WARNINGS" "$C_RESET"
 elif ((WARNINGS > 0)); then
   printf '%s没有发现已确认的严重问题，但有 %d 个警告/待处理项。%s\n' "$C_YELLOW" "$WARNINGS" "$C_RESET"
-  exit 1
 else
   printf '%s检查通过，未发现需立即处理的问题。%s\n' "$C_GREEN" "$C_RESET"
+fi
+
+section "下一步"
+SCRIPT_NAME="${0##*/}"
+
+if ((PREFLIGHT_CRITICALS > 0)); then
+  printf '%s先不要运行 --fix。%s 系统版本、软件源或 APT 刷新存在严重问题，请先处理上面的“严重”项目。\n' "$C_RED" "$C_RESET"
+elif [[ "$MODE" == "check" ]]; then
+  if ((PATCH_RECOMMENDED)); then
+    printf '%s发现可尝试通过 Debian 更新修复的问题。%s 下一步运行：\n' "$C_YELLOW" "$C_RESET"
+    printf '  sudo bash %q --fix\n' "$SCRIPT_NAME"
+    printf '修复结束后按照提示决定是否重启；之后再运行一次普通检查。\n'
+  elif ((REBOOT_RECOMMENDED)); then
+    printf '%s更新可能已经安装，目前只需要先重启：%s\n' "$C_YELLOW" "$C_RESET"
+    printf '  sudo reboot\n'
+    printf '服务器恢复后，再运行一次普通检查。此时无需先运行 --fix。\n'
+  elif ((CRITICALS > 0)); then
+    printf '%s存在无法由本脚本自动判断或修复的问题。%s 请按上面的严重提示人工处理，不要把运行 --fix 当成已经修好。\n' "$C_RED" "$C_RESET"
+  else
+    printf '%s当前无需运行 --fix。%s 如果只有自动更新、扫描工具等建议项，可以稍后按需配置。\n' "$C_GREEN" "$C_RESET"
+  fi
+else
+  if ((REBOOT_RECOMMENDED)); then
+    printf '%s补丁已经安装或内核已经更新，下一步需要重启：%s\n' "$C_YELLOW" "$C_RESET"
+    printf '  sudo reboot\n'
+    printf '服务器恢复后，再运行：\n'
+    printf '  sudo bash %q\n' "$SCRIPT_NAME"
+  elif ((PATCH_RECOMMENDED)); then
+    printf '%s修复后仍有可更新项目或运行内核仍有风险。%s 不要反复盲目运行 --fix，请查看上面的 hold、依赖或内核提示。\n' "$C_RED" "$C_RESET"
+  elif ((CRITICALS > 0)); then
+    printf '%s仍有脚本无法自动解决的严重问题。%s 请按照上面的提示人工处理。\n' "$C_RED" "$C_RESET"
+  else
+    printf '%s修复完成，当前无需再次运行 --fix。%s\n' "$C_GREEN" "$C_RESET"
+  fi
+fi
+
+if ((CRITICALS > 0)); then
+  exit 2
+elif ((WARNINGS > 0)); then
+  exit 1
+else
   exit 0
 fi
