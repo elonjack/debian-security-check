@@ -6,7 +6,7 @@
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="1.3.1"
+SCRIPT_VERSION="1.3.2"
 MODE="check"
 INTERACTIVE_MENU=0
 REFRESH_APT=1
@@ -64,7 +64,7 @@ if (($# == 0)) && [[ -t 0 ]]; then
 
   while true; do
     printf '\n%s%s%s\n' "$C_YELLOW" '  1) 智能检查并修复（有更新才安装，需要时自动重启）' "$C_RESET"
-    printf '%s\n'   '  0) 退出'
+    printf '%s%s%s\n' "$C_YELLOW" '  0) 退出' "$C_RESET"
     printf '\n%s请选择 [1/0]：%s' "$C_YELLOW" "$C_RESET"
 
     if ! read -r MENU_CHOICE; then

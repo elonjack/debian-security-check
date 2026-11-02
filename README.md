@@ -11,12 +11,12 @@
 在 Debian VPS 或独立服务器上运行：
 
 ```bash
-curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.3.1/install.sh | bash
+curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.3.2/install.sh | bash
 ```
 
 安装器会自动：
 
-1. 从 `v1.3.1` GitHub Release 下载正式脚本和 `SHA256SUMS`。
+1. 从 `v1.3.2` GitHub Release 下载正式脚本和 `SHA256SUMS`。
 2. 校验脚本 SHA-256；不一致就停止，不会执行。
 3. 安装到 `$HOME/debian-security-check/`。
 4. 恢复终端输入并打开 `1/0` 中文菜单。
@@ -27,9 +27,9 @@ curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v
 
 ```bash
 curl -fL -o debian-security-check.sh \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.3.1/debian-security-check.sh
+  https://github.com/elonjack/debian-security-check/releases/download/v1.3.2/debian-security-check.sh
 curl -fL -o SHA256SUMS \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.3.1/SHA256SUMS
+  https://github.com/elonjack/debian-security-check/releases/download/v1.3.2/SHA256SUMS
 grep '  debian-security-check.sh$' SHA256SUMS | sha256sum -c -
 ```
 
