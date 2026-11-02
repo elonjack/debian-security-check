@@ -8,7 +8,7 @@
 
 ### 一条命令安装并启动（推荐）
 
-本项目使用公开 GitHub 仓库。在 Debian VPS 运行下面这一条命令即可：
+本项目使用公开 GitHub 仓库。在 Debian VPS 或独立服务器上运行下面这一条命令即可：
 
 ```bash
 curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.3.1/install.sh | bash
@@ -57,7 +57,16 @@ bash debian-security-check.sh
 sudo bash debian-security-check.sh
 ```
 
-不要使用未经校验的 `curl ... | bash`，因为这样会把网络返回内容直接交给 root 执行，也不方便先阅读脚本。
+不要把主脚本 `debian-security-check.sh` 直接通过 `curl ... | bash` 交给 root 执行。上面的推荐命令运行的是固定版本安装器；安装器会先下载正式主脚本并校验 SHA-256。安全要求更高时仍应使用手动下载方法，先检查安装器和主脚本再执行。
+
+## 适用环境
+
+- **KVM、VMware、Hyper-V 等完整虚拟机：支持。** 自动重启只重启当前虚拟机，不会重启宿主机。
+- **Debian 独立服务器/物理服务器：支持。** 自动重启会重启整台物理机，SSH 会断开；生产机器应提前确认 IPMI、iDRAC、iLO 或其他带外控制台可用。
+- **LXC、OpenVZ、Docker 等容器：仅建议使用检查或人工更新。** 容器共享或受宿主机内核控制，容器内更新不能修复宿主机内核，也不应依赖容器内自动重启。
+- **Proxmox、云厂商或自编译内核：只能更新 Debian 用户态软件包。** 内核漏洞必须使用对应内核提供方发布的补丁。
+
+脚本只支持 Debian 12 和 Debian 13。Ubuntu、Debian testing/unstable/sid、混合发行版软件源以及不受支持的架构会被阻止进入智能更新流程。
 
 ## 功能
 
@@ -149,7 +158,16 @@ sudo bash debian-security-check.sh
 sudo bash debian-security-check.sh
 ```
 
-如果显示当前没有可安装更新，并自动返回菜单，说明本次 APT 更新流程已完成。它仍不能证明所有第三方软件、业务代码或尚无补丁的漏洞都已解决。
+重启后复查应同时满足：
+
+```text
+没有安全阻断项
+当前 APT 索引中没有待更新软件包
+运行中内核达到脚本列出的 CVE 修复线
+系统不再要求重启
+```
+
+满足这些条件并自动返回菜单，表示“当前已配置 APT 源中，适用于这台机器且已经发布的更新均已安装”。它不等于系统不存在任何漏洞，也不能证明第三方软件、业务代码、容器镜像或尚无补丁的漏洞已经解决。
 
 ## 自动化和批量服务器
 
