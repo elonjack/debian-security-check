@@ -4,11 +4,11 @@
 
 交互菜单提供一个“小白智能模式”：先完整检查，只有发现可安装更新且没有安全阻断项时，才先模拟再正式更新；更新后重新完整检查，确认没有剩余补丁并且确实需要重启时才自动重启。没有更新且无需重启时，不安装软件包并自动返回菜单。高级用户仍可用 `--check` / `--fix` 参数执行不会自动重启的检查或更新。
 
-## 先获取脚本
+## 安装与运行
 
 ### 一条命令安装并启动（推荐）
 
-本项目使用公开 GitHub 仓库。在 Debian VPS 或独立服务器上运行下面这一条命令即可：
+在 Debian VPS 或独立服务器上运行：
 
 ```bash
 curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.3.1/install.sh | bash
@@ -16,48 +16,30 @@ curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v
 
 安装器会自动：
 
-1. 从最新 GitHub Release 下载正式脚本和 `SHA256SUMS`。
+1. 从 `v1.3.1` GitHub Release 下载正式脚本和 `SHA256SUMS`。
 2. 校验脚本 SHA-256；不一致就停止，不会执行。
 3. 安装到 `$HOME/debian-security-check/`。
 4. 恢复终端输入并打开 `1/0` 中文菜单。
 
-这条命令的引导安装器本身来自公开 Release。安全要求更高时，应使用下一节的手动下载方法，先把文件保存下来检查，再执行。
+### 手动下载并校验（可选）
 
-### 手动下载并校验
-
-仅输入下面这条命令并不能下载脚本：
-
-```bash
-sudo bash debian-security-check.sh
-```
-
-它只会执行当前目录中已经存在的 `debian-security-check.sh`。必须先从 GitHub Release 下载或上传到 VPS。
-
-### 当前公开仓库：直接在 VPS 下载
-
-本仓库当前是公开仓库，可以直接在 VPS 下载最新版 Release：
+希望先查看脚本再执行时：
 
 ```bash
 curl -fL -o debian-security-check.sh \
   https://github.com/elonjack/debian-security-check/releases/download/v1.3.1/debian-security-check.sh
 curl -fL -o SHA256SUMS \
   https://github.com/elonjack/debian-security-check/releases/download/v1.3.1/SHA256SUMS
-sha256sum -c SHA256SUMS
+grep '  debian-security-check.sh$' SHA256SUMS | sha256sum -c -
 ```
 
-确认输出 `debian-security-check.sh: OK` 后再运行。使用 root 登录 VPS 时：
-
-```bash
-bash debian-security-check.sh
-```
-
-使用具有 sudo 权限的普通用户时：
+确认输出 `debian-security-check.sh: OK` 后运行：
 
 ```bash
 sudo bash debian-security-check.sh
 ```
 
-不要把主脚本 `debian-security-check.sh` 直接通过 `curl ... | bash` 交给 root 执行。上面的推荐命令运行的是固定版本安装器；安装器会先下载正式主脚本并校验 SHA-256。安全要求更高时仍应使用手动下载方法，先检查安装器和主脚本再执行。
+root 用户也可以去掉 `sudo`。不要把主脚本 `debian-security-check.sh` 直接通过 `curl ... | bash` 执行；推荐的一键命令运行的是固定版本安装器，安装器会先校验主脚本 SHA-256。
 
 ## 适用环境
 
@@ -87,7 +69,7 @@ sudo bash debian-security-check.sh
 运行一个命令即可打开中文菜单：
 
 ```bash
-sudo bash debian-security-check.sh
+sudo bash "$HOME/debian-security-check/debian-security-check.sh"
 ```
 
 菜单内容：
@@ -125,7 +107,7 @@ sudo bash debian-security-check.sh
 下载后先检查：
 
 ```bash
-sudo bash debian-security-check.sh
+sudo bash "$HOME/debian-security-check/debian-security-check.sh"
 ```
 
 然后选择：
@@ -155,7 +137,7 @@ sudo bash debian-security-check.sh
 服务器恢复后，再运行脚本并选择 `1`：
 
 ```bash
-sudo bash debian-security-check.sh
+sudo bash "$HOME/debian-security-check/debian-security-check.sh"
 ```
 
 重启后复查应同时满足：
@@ -175,10 +157,10 @@ sudo bash debian-security-check.sh
 
 ```bash
 # 直接检查，不显示菜单
-sudo bash debian-security-check.sh --check
+sudo bash "$HOME/debian-security-check/debian-security-check.sh" --check
 
 # 直接预检并安装更新，不显示菜单
-sudo bash debian-security-check.sh --fix
+sudo bash "$HOME/debian-security-check/debian-security-check.sh" --fix
 ```
 
 所以菜单和参数并不冲突：普通用户使用菜单，自动化运维使用参数。
