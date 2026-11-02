@@ -2,7 +2,7 @@
 
 面向 Debian 12（Bookworm）和 Debian 13（Trixie）的安全检查与保守更新脚本。
 
-交互菜单提供一个“小白智能模式”：先完整检查，只有发现可安装更新且没有安全阻断项时，才先模拟再正式更新；更新后重新完整检查，确认没有剩余补丁并且确实需要重启时才自动重启。没有更新且无需重启时，不安装软件包并自动返回菜单。高级用户仍可用 `--check` / `--fix` 参数执行不会自动重启的检查或更新。
+交互菜单同时提供“一次性智能检查修复”和“长期自动安全更新设置”。一次性模式先完整检查，只有发现可安装更新且没有安全阻断项时，才先模拟再正式更新；长期模式由用户明确开启后，在指定时间只安装 Debian 官方安全仓库允许的更新，并可选择是否在更新成功且确实需要时自动重启。默认不会自动开启长期功能。高级用户仍可用 `--check` / `--fix` 参数执行不会自动重启的检查或更新。
 
 ## 安装与运行
 
@@ -11,15 +11,15 @@
 在 Debian VPS 或独立服务器上运行：
 
 ```bash
-curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.3.2/install.sh | bash
+curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.4.0/install.sh | bash
 ```
 
 安装器会自动：
 
-1. 从 `v1.3.2` GitHub Release 下载正式脚本和 `SHA256SUMS`。
+1. 从 `v1.4.0` GitHub Release 下载正式脚本和 `SHA256SUMS`。
 2. 校验脚本 SHA-256；不一致就停止，不会执行。
 3. 安装到 `$HOME/debian-security-check/`。
-4. 恢复终端输入并打开 `1/0` 中文菜单。
+4. 恢复终端输入并打开 `1/2/0` 中文菜单。
 
 ### 手动下载并校验（可选）
 
@@ -27,9 +27,9 @@ curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v
 
 ```bash
 curl -fL -o debian-security-check.sh \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.3.2/debian-security-check.sh
+  https://github.com/elonjack/debian-security-check/releases/download/v1.4.0/debian-security-check.sh
 curl -fL -o SHA256SUMS \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.3.2/SHA256SUMS
+  https://github.com/elonjack/debian-security-check/releases/download/v1.4.0/SHA256SUMS
 grep '  debian-security-check.sh$' SHA256SUMS | sha256sum -c -
 ```
 
@@ -44,7 +44,7 @@ root 用户也可以去掉 `sudo`。不要把主脚本 `debian-security-check.sh
 ## 适用环境
 
 - **KVM、VMware、Hyper-V 等完整虚拟机：支持。** 自动重启只重启当前虚拟机，不会重启宿主机。
-- **Debian 独立服务器/物理服务器：支持。** 自动重启会重启整台物理机，SSH 会断开；生产机器应提前确认 IPMI、iDRAC、iLO 或其他带外控制台可用。
+- **Debian 独立服务器/物理服务器：支持。** 自动重启会重启整台物理机，SSH 会断开；重要业务机器建议开启自动安全更新但暂不自动重启，并提前确认 IPMI、iDRAC、iLO 或其他带外控制台可用。
 - **LXC、OpenVZ、Docker 等容器：仅建议使用检查或人工更新。** 容器共享或受宿主机内核控制，容器内更新不能修复宿主机内核，也不应依赖容器内自动重启。
 - **Proxmox、云厂商或自编译内核：只能更新 Debian 用户态软件包。** 内核漏洞必须使用对应内核提供方发布的补丁。
 
@@ -60,6 +60,9 @@ root 用户也可以去掉 `sudo`。不要把主脚本 `debian-security-check.sh
 - 检查是否需要重启，以及是否启用了 `unattended-upgrades`
 - 如果已安装 `debsecan`，列出已有修复可安装的漏洞包
 - 交互模式先完整检查，有更新才模拟并安装，复查确认需要时才自动重启
+- 可单独开启长期自动安全更新，并选择“不自动重启”或“更新完整成功后确需重启才自动重启”
+- 长期模式清空默认更新来源，只允许 Debian 官方 `Debian-Security` 来源，不自动更新第三方仓库
+- 长期模式禁止自动删包、自动降级和关机时升级；有登录用户时不自动重启
 - 禁用/备份的 APT 源不会被误判为有效安全源；混入 testing/sid 时阻止自动更新
 - 升级失败、仍有补丁或存在严重问题时绝不自动重启
 - `--fix` 使用不会主动删除软件包的保守更新方式，且不会自动重启
@@ -72,14 +75,15 @@ root 用户也可以去掉 `sudo`。不要把主脚本 `debian-security-check.sh
 sudo bash "$HOME/debian-security-check/debian-security-check.sh"
 ```
 
-菜单内容：
+主菜单内容：
 
 ```text
 1) 智能检查并修复（有更新才安装，需要时自动重启）
+2) 自动安全更新设置（长期生效，默认不会自动开启）
 0) 退出
 ```
 
-选择 `1` 即可完成“检查 → 必要时更新 → 必要时重启”的流程，不再需要把检查结果发给别人判断，也不用再次选择修复选项。
+选择 `1` 即可完成本次“检查 → 必要时更新 → 必要时重启”的流程，不再需要把检查结果发给别人判断，也不用再次选择修复选项。选择 `2` 才会进入长期自动更新设置；脚本不会自行开启。
 
 执行流程如下：
 
@@ -151,6 +155,48 @@ sudo bash "$HOME/debian-security-check/debian-security-check.sh"
 
 满足这些条件并自动返回菜单，表示“当前已配置 APT 源中，适用于这台机器且已经发布的更新均已安装”。它不等于系统不存在任何漏洞，也不能证明第三方软件、业务代码、容器镜像或尚无补丁的漏洞已经解决。
 
+## 长期自动安全更新
+
+在主菜单选择 `2`：
+
+```text
+1) 开启自动安装 Debian 安全更新（不自动重启）
+2) 定时安装安全更新（成功后确需重启才自动重启）
+3) 查看当前状态
+4) 关闭无人值守安装和自动重启
+5) 移除本脚本配置（恢复系统原有设置）
+0) 返回主菜单
+```
+
+建议普通 KVM VPS 选择 `2` 并指定业务低峰时间；重要业务服务器和独立服务器建议先选择 `1`，由管理员安排重启。这里的设置长期生效，与主菜单选项 `1` 的单次检查修复不同。
+
+开启前，脚本会重新检查 Debian 版本、security 软件源以及是否混入 testing/sid，并要求 `apt-get update` 完整成功。随后安装 Debian 的 `unattended-upgrades`，写入独立的 APT 配置、受控执行器和 systemd service/timer，校验 APT 最终有效配置及 systemd 单元后才启用。已有但并非本脚本创建的同名文件不会被覆盖。
+
+本脚本管理的文件为：
+
+```text
+/etc/apt/apt.conf.d/99debian-security-check
+/usr/local/sbin/debian-security-check-auto-update
+/etc/systemd/system/debian-security-check-auto-update.service
+/etc/systemd/system/debian-security-check-auto-update.timer
+```
+
+长期模式具有以下边界：
+
+- 只允许 Origin/Label 为 Debian 官方安全仓库的更新，不自动安装普通 stable 更新或第三方仓库更新。
+- 不自动删除软件包，不自动降级，不在关机过程中升级，也不会自动跨版本升级 Debian。
+- Debian 自带的 `Unattended-Upgrade::Automatic-Reboot` 始终保持关闭；重启只由本脚本受控执行器判断。
+- 选择自动重启后，也只有索引刷新成功、安全更新命令完整成功、且本次执行新产生 `/run/reboot-required` 时才继续；有登录用户时跳过自动重启。
+- 指定时间使用服务器本机时区；为避免多台服务器同时访问镜像并同时重启，每台机器会在指定时间后的 5 分钟随机窗口内开始，安装耗时也不固定，满足全部条件时会在安装结束后重启。
+- 定时器不补跑关机期间错过的任务；机器在当天时间窗口内关机，就等下一次计划时间。
+- 若因为有用户登录而跳过重启，脚本不会在用户退出后突然补重启；请在维护窗口手动重启或运行主菜单选项 `1`。
+- 更新日志位于 `/var/log/unattended-upgrades/`。
+- 定时任务及失败原因可用 `journalctl -u debian-security-check-auto-update.service` 查看；主菜单的普通检查也会提示上一次任务是否失败。
+
+选择 `4` 会停用本脚本定时器，并用本脚本配置明确关闭 APT 自带的无人值守安装和自动重启，但保留软件包、管理文件及日志；选择 `5` 只删除本脚本创建的上述四个管理文件，使结果重新由机器上其他 APT 配置决定。两项操作都不会卸载软件或删除已安装更新。
+
+长期模式只处理 Debian Security 来源。仍建议定期运行主菜单选项 `1`，检查普通 stable 更新、被 hold 的包、运行中内核以及自动任务失败记录。
+
 ## 自动化和批量服务器
 
 菜单适合人工操作。Ansible、定时任务或批量 SSH 不能等待菜单输入，因此仍然保留参数模式；参数模式不会自动重启服务器，但更新软件时仍可能重启部分服务，应先在测试机验证：
@@ -165,7 +211,7 @@ sudo bash "$HOME/debian-security-check/debian-security-check.sh" --fix
 
 所以菜单和参数并不冲突：普通用户使用菜单，自动化运维使用参数。
 
-`--check` 只检查；`--fix` 预检并安装更新。两者都不会自动执行 `reboot`，自动重启只属于人工明确选择的交互菜单智能模式。
+`--check` 只检查；`--fix` 预检并安装更新。两者本次执行都不会自动调用 `reboot`。交互菜单选项 `1` 的一次性智能模式，以及用户主动开启的长期定时重启策略，是两套独立机制。
 
 离线检查（结果可能不是最新）：
 
@@ -191,8 +237,10 @@ bash debian-security-check.sh --no-refresh
 建议额外安装 Debian 官方扫描工具：
 
 ```bash
-sudo apt-get install debsecan debian-security-support needrestart unattended-upgrades
+sudo apt-get install debsecan debian-security-support needrestart
 ```
+
+`unattended-upgrades` 可直接从脚本主菜单选项 `2` 安装和安全配置，不需要另行执行 `dpkg-reconfigure`。
 
 ## `CVE-2026-98432`
 
