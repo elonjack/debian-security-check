@@ -2,7 +2,7 @@
 
 面向 Debian 12（Bookworm）和 Debian 13（Trixie）的安全检查与保守更新脚本。
 
-交互菜单提供一个“小白智能模式”：先检查，只有发现可安装更新且预检通过时才更新；更新成功后自动重启。没有更新时不会修改系统，并自动返回菜单。高级用户仍可用 `--check` / `--fix` 参数执行不会自动重启的检查或更新。
+交互菜单提供一个“小白智能模式”：先完整检查，只有发现可安装更新且没有安全阻断项时，才先模拟再正式更新；更新后重新完整检查，确认没有剩余补丁并且确实需要重启时才自动重启。没有更新且无需重启时，不安装软件包并自动返回菜单。高级用户仍可用 `--check` / `--fix` 参数执行不会自动重启的检查或更新。
 
 ## 先获取脚本
 
@@ -11,7 +11,7 @@
 本项目使用公开 GitHub 仓库。在 Debian VPS 运行下面这一条命令即可：
 
 ```bash
-curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.3.0/install.sh | bash
+curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.3.1/install.sh | bash
 ```
 
 安装器会自动：
@@ -39,9 +39,9 @@ sudo bash debian-security-check.sh
 
 ```bash
 curl -fL -o debian-security-check.sh \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.3.0/debian-security-check.sh
+  https://github.com/elonjack/debian-security-check/releases/download/v1.3.1/debian-security-check.sh
 curl -fL -o SHA256SUMS \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.3.0/SHA256SUMS
+  https://github.com/elonjack/debian-security-check/releases/download/v1.3.1/SHA256SUMS
 sha256sum -c SHA256SUMS
 ```
 
@@ -68,7 +68,9 @@ sudo bash debian-security-check.sh
 - 识别容器、第三方内核、自编译内核和缺失的内核元包
 - 检查是否需要重启，以及是否启用了 `unattended-upgrades`
 - 如果已安装 `debsecan`，列出已有修复可安装的漏洞包
-- 交互模式先检查，有更新才安装，成功后自动重启
+- 交互模式先完整检查，有更新才模拟并安装，复查确认需要时才自动重启
+- 禁用/备份的 APT 源不会被误判为有效安全源；混入 testing/sid 时阻止自动更新
+- 升级失败、仍有补丁或存在严重问题时绝不自动重启
 - `--fix` 使用不会主动删除软件包的保守更新方式，且不会自动重启
 
 ## 小白推荐流程
@@ -82,7 +84,7 @@ sudo bash debian-security-check.sh
 菜单内容：
 
 ```text
-1) 智能检查并修复（有更新才安装，成功后自动重启）
+1) 智能检查并修复（有更新才安装，需要时自动重启）
 0) 退出
 ```
 
@@ -93,10 +95,14 @@ sudo bash debian-security-check.sh
 ```text
 选择 1
    ├─ 先检查 Debian、security 源并刷新 APT 索引
-   ├─ 没有可安装更新、无需重启 → 不修改系统，3 秒后自动返回菜单
-   ├─ 有可安装更新且预检通过 → 安装更新
-   │                              ├─ 安装成功 → 提示 10 秒后自动重启，SSH 会断开
-   │                              └─ 安装失败 → 不重启，保留错误信息
+   ├─ 禁用安全源、混入 testing/sid 或检查失败 → 不安装、不重启
+   ├─ 没有可安装更新、无需重启 → 不安装软件包，3 秒后自动返回菜单
+   ├─ 有可安装更新且完整检查通过 → 先模拟升级，再安装更新
+   │                                  ├─ 安装失败 → 明确禁止重启，保留错误信息
+   │                                  └─ 安装成功 → 再完整检查一次
+   │                                                     ├─ 仍有补丁/严重问题 → 不重启
+   │                                                     ├─ 确实需要重启 → 10 秒后自动重启
+   │                                                     └─ 无需重启 → 返回菜单
    ├─ 新内核已安装但尚未启用 → 提示 10 秒后自动重启
    └─ 系统版本、软件源或 APT 有严重错误 → 不安装、不重启，提示人工处理
 
@@ -119,16 +125,17 @@ sudo bash debian-security-check.sh
 1) 智能检查并修复
 ```
 
-脚本始终先检查。若没有更新，它不会执行升级，也不会重启；若有更新，只有在系统版本、安全软件源和 APT 索引检查均无严重问题时，才执行 `apt-get -y upgrade --with-new-pkgs`。
+脚本始终先完成全部检查。若没有更新且不需要重启，它不会执行升级或重启；若有更新，只有在系统版本、架构、真正启用的安全源、APT 索引、软件包状态和内核检查均无阻断项时，才继续。
 
 智能模式的更新顺序是：
 
 1. 检查 Debian 版本、支持状态和 security 软件源。
 2. 执行 `apt-get update`，要求所有软件源成功刷新。
 3. 显示 hold 包和待更新数量。
-4. 没有待更新包时跳过安装；有更新且预检通过时执行保守升级。
-5. 重新检查待更新包、漏洞状态、运行中内核和重启需求。
-6. 更新成功或新内核等待启用时自动重启；检查/升级失败时绝不自动重启。
+4. 没有待更新包时跳过安装；有更新时先执行 `apt-get -s upgrade --with-new-pkgs` 模拟升级。
+5. 模拟通过后才执行正式的保守升级。
+6. 更新成功后重新检查安全源、待更新包、漏洞状态、运行中内核和重启需求。
+7. 只有复查确认没有剩余补丁、没有严重问题并且确实需要重启时才自动重启；检查或升级失败时绝不自动重启。
 
 脚本不会自动解除 hold，也不会运行会主动删除包的 `dist-upgrade/full-upgrade`。
 
