@@ -20,8 +20,8 @@ jobs:
         run: bash debian-security-check.sh --help
       - name: Version smoke test
         run: |
-          test "$(bash debian-security-check.sh --version)" = "1.4.1"
-          grep -q 'RELEASE_TAG="v1.4.1"' install.sh
+          test "$(bash debian-security-check.sh --version)" = "1.5.0"
+          grep -q 'RELEASE_TAG="v1.5.0"' install.sh
       - name: Safety self-test
         run: bash debian-security-check.sh --self-test
       - name: Interactive menu exit smoke test
@@ -29,11 +29,21 @@ jobs:
           menu_output="$(printf '0\n' | script -qec 'bash debian-security-check.sh' /dev/null)"
           grep -q '1) 智能检查并修复' <<<"$menu_output"
           grep -q '2) 自动安全更新设置' <<<"$menu_output"
-          grep -q '请选择 \[1/2/0\]' <<<"$menu_output"
+          grep -q '3) 旧内核安全清理' <<<"$menu_output"
+          grep -q '请选择 \[1/2/3/0\]' <<<"$menu_output"
           grep -q '已退出，没有修改系统' <<<"$menu_output"
           grep -Fq $'\033[33m  1) 智能检查并修复（有更新才安装，需要时自动重启）\033[0m' <<<"$menu_output"
           grep -Fq $'\033[33m  2) 自动安全更新设置（长期生效，默认不会自动开启）\033[0m' <<<"$menu_output"
+          grep -Fq $'\033[33m  3) 旧内核安全清理（默认关闭，始终保留当前和一个备用）\033[0m' <<<"$menu_output"
           grep -Fq $'\033[33m  0) 退出\033[0m' <<<"$menu_output"
+      - name: Kernel cleanup submenu smoke test
+        run: |
+          menu_output="$(printf '3\n0\n0\n' | script -qec 'bash debian-security-check.sh' /dev/null)"
+          grep -q '旧内核安全清理（默认关闭）' <<<"$menu_output"
+          grep -q '1) 查看可清理的旧内核' <<<"$menu_output"
+          grep -q '2) 立即安全清理一次' <<<"$menu_output"
+          grep -q '3) 开启每周自动检查和清理' <<<"$menu_output"
+          grep -q '请选择 \[1/2/3/4/5/0\]' <<<"$menu_output"
       - name: Reject unsafe option combination
         run: |
           set +e

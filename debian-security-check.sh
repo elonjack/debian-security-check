@@ -6,7 +6,7 @@
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="1.4.1"
+SCRIPT_VERSION="1.5.0"
 MODE="check"
 INTERACTIVE_MENU=0
 REFRESH_APT=1
@@ -26,6 +26,11 @@ AUTO_UPDATE_MARKER="Managed by debian-security-check"
 AUTO_UPDATE_HELPER="/usr/local/sbin/debian-security-check-auto-update"
 AUTO_UPDATE_SERVICE="/etc/systemd/system/debian-security-check-auto-update.service"
 AUTO_UPDATE_TIMER="/etc/systemd/system/debian-security-check-auto-update.timer"
+KERNEL_CLEANUP_MARKER="Managed by debian-security-check kernel cleanup"
+KERNEL_CLEANUP_HELPER="/usr/local/sbin/debian-security-check-kernel-cleanup"
+KERNEL_CLEANUP_SERVICE="/etc/systemd/system/debian-security-check-kernel-cleanup.service"
+KERNEL_CLEANUP_TIMER="/etc/systemd/system/debian-security-check-kernel-cleanup.timer"
+KERNEL_CLEANUP_MIN_AGE_DAYS=30
 
 if [[ -t 1 && "${NO_COLOR:-}" == "" ]]; then
   C_RED=$'\033[31m'
@@ -56,7 +61,7 @@ usage() {
 
 退出码：0=未发现需处理项，1=有警告/待更新/待重启，2=严重问题或检查失败。
 
-交互菜单的选项 1 执行一次性智能检查与修复；选项 2 管理长期自动安全更新。
+交互菜单的选项 1 执行一次性智能检查与修复；选项 2 管理长期自动安全更新；选项 3 管理旧内核安全清理。
 一次性智能模式复查确认需要重启时才自动重启。自动化参数模式不会自动重启。
 EOF
 }
@@ -64,14 +69,15 @@ EOF
 if (($# == 0)) && [[ -t 0 ]]; then
   INTERACTIVE_MENU=1
   printf '\n%s%sDebian 安全检查与修复 v%s%s\n' "$C_BOLD" "$C_YELLOW" "$SCRIPT_VERSION" "$C_RESET"
-  printf '%s%s选择 1：本次检查修复；选择 2：设置以后自动安装安全更新。%s\n' "$C_BOLD" "$C_YELLOW" "$C_RESET"
+  printf '%s%s选择 1：本次检查修复；选择 2：设置以后自动安装安全更新；选择 3：旧内核安全清理。%s\n' "$C_BOLD" "$C_YELLOW" "$C_RESET"
   printf '%s%s自动重启会断开当前 SSH；检查或升级失败时不会自动重启。%s\n' "$C_BOLD" "$C_YELLOW" "$C_RESET"
 
   while true; do
     printf '\n%s%s%s\n' "$C_YELLOW" '  1) 智能检查并修复（有更新才安装，需要时自动重启）' "$C_RESET"
     printf '%s%s%s\n' "$C_YELLOW" '  2) 自动安全更新设置（长期生效，默认不会自动开启）' "$C_RESET"
+    printf '%s%s%s\n' "$C_YELLOW" '  3) 旧内核安全清理（默认关闭，始终保留当前和一个备用）' "$C_RESET"
     printf '%s%s%s\n' "$C_YELLOW" '  0) 退出' "$C_RESET"
-    printf '\n%s请选择 [1/2/0]：%s' "$C_YELLOW" "$C_RESET"
+    printf '\n%s请选择 [1/2/3/0]：%s' "$C_YELLOW" "$C_RESET"
 
     if ! read -r MENU_CHOICE; then
       printf '\n未读取到选择，已退出。\n' >&2
@@ -87,12 +93,16 @@ if (($# == 0)) && [[ -t 0 ]]; then
         MODE="auto-settings"
         break
         ;;
+      3)
+        MODE="kernel-cleanup-settings"
+        break
+        ;;
       0)
         printf '已退出，没有修改系统。\n'
         exit 0
         ;;
       *)
-        printf '输入无效，请输入 1、2 或 0。\n' >&2
+        printf '输入无效，请输入 1、2、3 或 0。\n' >&2
         ;;
     esac
   done
@@ -239,6 +249,285 @@ pending_newer_kernel_target() {
   is_official_debian_kernel_source "$target_source" || return 1
   kernel_target_requires_reboot "$running_package" "$running_version" "$target_package" "$target_version" || return 1
   printf '%s\n' "$matching"
+}
+
+classify_kernel_cleanup_records() {
+  local current_package="$1" now_epoch="$2" minimum_age_days="$3"
+  local package version modified role age_days i current_index=-1 fallback_index=-1
+  local -a packages=() versions=() modified_times=()
+
+  while IFS='|' read -r package version modified; do
+    [[ -n "$package" && -n "$version" ]] || continue
+    packages+=("$package")
+    versions+=("$version")
+    modified_times+=("$modified")
+  done
+
+  for i in "${!packages[@]}"; do
+    if [[ "${packages[$i]}" == "$current_package" ]]; then
+      current_index=$i
+      break
+    fi
+  done
+  ((current_index >= 0)) || return 2
+
+  for i in "${!packages[@]}"; do
+    ((i == current_index)) && continue
+    if ((fallback_index < 0)) || dpkg --compare-versions "${versions[$i]}" gt "${versions[$fallback_index]}"; then
+      fallback_index=$i
+    fi
+  done
+
+  for i in "${!packages[@]}"; do
+    package="${packages[$i]}"
+    version="${versions[$i]}"
+    modified="${modified_times[$i]}"
+    age_days=-1
+    if [[ "$modified" =~ ^[0-9]+$ ]] && ((modified > 0 && modified <= now_epoch)); then
+      age_days=$(((now_epoch - modified) / 86400))
+    fi
+
+    if ((i == current_index)); then
+      role="current"
+    elif ((i == fallback_index)); then
+      role="fallback"
+    elif ((${#packages[@]} < 3)); then
+      role="protected"
+    elif ((age_days < 0)); then
+      role="unknown-age"
+    elif ((age_days >= minimum_age_days)); then
+      role="candidate"
+    else
+      role="young"
+    fi
+    printf '%s|%s|%s|%s|%s\n' "$role" "$package" "$version" "$modified" "$age_days"
+  done
+}
+
+kernel_cleanup_build_plan() {
+  local command_name os_id os_version audit_output held_packages
+  local needrestart_status
+  local running_release running_package running_query running_status running_source running_version
+  local meta_records matching_meta_record matching_meta meta_version target_package target_version target_source
+  local kernel_query status package version source modified release series_match series_meta
+  local series_records="" classification role age_days now_epoch count=0
+
+  KERNEL_CLEANUP_CANDIDATES=()
+  KERNEL_CLEANUP_DETAILS=()
+  KERNEL_CLEANUP_REASON=""
+  KERNEL_CLEANUP_META=""
+  KERNEL_CLEANUP_TARGET=""
+
+  for command_name in apt-get apt-mark awk date dpkg dpkg-query grep sed uname; do
+    if ! have "$command_name"; then
+      KERNEL_CLEANUP_REASON="缺少必要命令：$command_name"
+      return 2
+    fi
+  done
+  if [[ ! -r /etc/os-release ]]; then
+    KERNEL_CLEANUP_REASON="找不到 /etc/os-release。"
+    return 2
+  fi
+  os_id="$(awk -F= '$1 == "ID" {gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release)"
+  os_version="$(awk -F= '$1 == "VERSION_ID" {gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release)"
+  if [[ "$os_id" != "debian" || ("$os_version" != "12" && "$os_version" != "13") ]]; then
+    KERNEL_CLEANUP_REASON="旧内核清理只支持 Debian 12/13。"
+    return 2
+  fi
+  if { have systemd-detect-virt && systemd-detect-virt --quiet --container; } || [[ -e /.dockerenv || -e /run/.containerenv ]]; then
+    KERNEL_CLEANUP_REASON="容器内核由宿主机控制，禁止在容器内自动清理。"
+    return 2
+  fi
+  if [[ -e /run/reboot-required ]]; then
+    KERNEL_CLEANUP_REASON="系统当前明确要求重启；请先重启并确认新内核正常，再清理旧内核。"
+    return 2
+  fi
+  if have needrestart; then
+    run_root needrestart -p -k >/dev/null 2>&1
+    needrestart_status=$?
+    if ((needrestart_status == 2)); then
+      KERNEL_CLEANUP_REASON="needrestart 确认运行中内核已过期；请先重启，再清理旧内核。"
+      return 2
+    elif ((needrestart_status != 0)); then
+      KERNEL_CLEANUP_REASON="needrestart 内核状态检查失败，禁止清理。"
+      return 2
+    fi
+  fi
+
+  audit_output="$(dpkg --audit 2>&1 || true)"
+  if [[ -n "$audit_output" ]]; then
+    KERNEL_CLEANUP_REASON="dpkg 报告未完成或异常的软件包状态，禁止清理。"
+    return 2
+  fi
+  if ! run_root apt-get -o DPkg::Lock::Timeout=0 check >/dev/null 2>&1; then
+    KERNEL_CLEANUP_REASON="APT 依赖检查失败或软件包管理器正忙，禁止清理。"
+    return 2
+  fi
+  held_packages="$(apt-mark showhold 2>/dev/null || true)"
+  if [[ -n "$held_packages" ]]; then
+    KERNEL_CLEANUP_REASON="存在被 hold 的软件包，禁止自动清理内核。"
+    return 2
+  fi
+
+  running_release="$(uname -r)"
+  running_package="linux-image-$running_release"
+  running_query="$(dpkg-query -W -f='${db:Status-Abbrev}|${source:Package}|${source:Version}|${Version}' "$running_package" 2>/dev/null || true)"
+  IFS='|' read -r running_status running_source _ running_version <<<"$running_query"
+  if [[ "$running_status" != ii* || -z "$running_version" ]] || ! is_official_debian_kernel_source "$running_source"; then
+    KERNEL_CLEANUP_REASON="当前运行内核不是可确认的 Debian 官方已安装内核，禁止清理。"
+    return 2
+  fi
+
+  meta_records="$(installed_kernel_meta_records || true)"
+  matching_meta_record="$(matching_kernel_meta_record "$running_release" <<<"$meta_records" || true)"
+  if [[ -z "$matching_meta_record" ]]; then
+    KERNEL_CLEANUP_REASON="没有找到与当前运行内核同系列的 Debian 内核元包，禁止清理。"
+    return 2
+  fi
+  IFS='|' read -r matching_meta meta_version target_package target_version target_source _ <<<"$matching_meta_record"
+  if ! is_official_debian_kernel_source "$target_source"; then
+    KERNEL_CLEANUP_REASON="内核元包目标不是可确认的 Debian 官方内核，禁止清理。"
+    return 2
+  fi
+  if [[ "$target_package" != "$running_package" ]]; then
+    KERNEL_CLEANUP_REASON="新内核已经安装但尚未运行；必须先重启进入 $target_package，禁止清理。"
+    return 2
+  fi
+  KERNEL_CLEANUP_META="$matching_meta $meta_version"
+  KERNEL_CLEANUP_TARGET="$target_package $target_version"
+
+  kernel_query="$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${Version}|${source:Package}|${db-fsys:Last-Modified}\n' 'linux-image-[0-9]*' 2>/dev/null || true)"
+  while IFS='|' read -r status package version source modified; do
+    [[ "$status" == ii* ]] || continue
+    package="${package%%:*}"
+    [[ "$package" == linux-image-[0-9]* ]] || continue
+    release="${package#linux-image-}"
+    series_match="$(matching_kernel_meta_record "$release" <<<"$meta_records" || true)"
+    [[ -n "$series_match" ]] || continue
+    IFS='|' read -r series_meta _ <<<"$series_match"
+    [[ "$series_meta" == "$matching_meta" ]] || continue
+    if ! is_official_debian_kernel_source "$source"; then
+      KERNEL_CLEANUP_REASON="同系列内核 $package 来自无法确认的源包 $source，禁止清理。"
+      return 2
+    fi
+    series_records+="${series_records:+$'\n'}$package|$version|$modified"
+    count=$((count + 1))
+  done <<<"$kernel_query"
+
+  if ((count == 0)); then
+    KERNEL_CLEANUP_REASON="没有找到当前系列的已安装内核，禁止清理。"
+    return 2
+  fi
+  now_epoch="$(date +%s)"
+  classification="$(classify_kernel_cleanup_records "$running_package" "$now_epoch" "$KERNEL_CLEANUP_MIN_AGE_DAYS" <<<"$series_records")" || {
+    KERNEL_CLEANUP_REASON="无法在已安装内核列表中确认当前运行内核，禁止清理。"
+    return 2
+  }
+
+  while IFS='|' read -r role package version modified age_days; do
+    [[ -n "$role" ]] || continue
+    KERNEL_CLEANUP_DETAILS+=("$role|$package|$version|$modified|$age_days")
+    if [[ "$role" == "candidate" ]]; then
+      KERNEL_CLEANUP_CANDIDATES+=("$package")
+    fi
+  done <<<"$classification"
+
+  if ((count < 3)); then
+    KERNEL_CLEANUP_REASON="当前系列只有 $count 个内核；至少三个才会清理。"
+    return 3
+  fi
+  if ((${#KERNEL_CLEANUP_CANDIDATES[@]} == 0)); then
+    KERNEL_CLEANUP_REASON="没有安装满 $KERNEL_CLEANUP_MIN_AGE_DAYS 天且位于第三位或更旧的内核。"
+    return 3
+  fi
+  return 0
+}
+
+kernel_cleanup_print_plan() {
+  local detail role package version age_days age_text
+  printf '[信息] 当前内核元包：%s\n' "${KERNEL_CLEANUP_META:-未知}"
+  printf '[信息] 元包最新目标：%s\n' "${KERNEL_CLEANUP_TARGET:-未知}"
+  for detail in "${KERNEL_CLEANUP_DETAILS[@]}"; do
+    IFS='|' read -r role package version _ age_days <<<"$detail"
+    if ((age_days >= 0)); then age_text="约 ${age_days} 天"; else age_text="安装时间未知"; fi
+    case "$role" in
+      current) printf '[保留] %s %s（当前运行且为最新内核，%s）\n' "$package" "$version" "$age_text" ;;
+      fallback) printf '[保留] %s %s（最近的备用内核，%s）\n' "$package" "$version" "$age_text" ;;
+      candidate) printf '[候选] %s %s（第三个或更旧，%s）\n' "$package" "$version" "$age_text" ;;
+      young) printf '[保留] %s %s（尚未满 %s 天，%s）\n' "$package" "$version" "$KERNEL_CLEANUP_MIN_AGE_DAYS" "$age_text" ;;
+      unknown-age) printf '[保留] %s %s（无法确认安装时间）\n' "$package" "$version" ;;
+      *) printf '[保留] %s %s（受保护，%s）\n' "$package" "$version" "$age_text" ;;
+    esac
+  done
+  if [[ -n "$KERNEL_CLEANUP_REASON" ]]; then
+    printf '[信息] %s\n' "$KERNEL_CLEANUP_REASON"
+  fi
+}
+
+kernel_cleanup_simulation_matches_candidates() {
+  local simulation="$1" package removal
+  shift
+  local -a removals=()
+  local -A expected=() seen=()
+
+  (($# > 0)) || return 1
+  for package in "$@"; do
+    [[ "$package" =~ ^linux-image-[0-9][[:alnum:].+~_-]*$ ]] || return 1
+    expected["$package"]=1
+  done
+  if grep -qE '^Inst[[:space:]]' <<<"$simulation"; then
+    return 1
+  fi
+  mapfile -t removals < <(sed -nE 's/^(Remv|Purg)[[:space:]]+([^[:space:]]+).*/\2/p' <<<"$simulation" | sed -E 's/:[[:alnum:]_-]+$//' | awk '!seen[$0]++')
+  ((${#removals[@]} > 0)) || return 1
+  for removal in "${removals[@]}"; do
+    [[ -n "${expected[$removal]:-}" ]] || return 1
+    seen["$removal"]=1
+  done
+  for package in "$@"; do
+    [[ -n "${seen[$package]:-}" ]] || return 1
+  done
+}
+
+kernel_cleanup_validate_simulation() {
+  local simulation
+  (($# > 0)) || return 1
+  if ! simulation="$(run_root apt-get -s -o DPkg::Lock::Timeout=0 purge "$@" 2>&1)"; then
+    printf '%s\n' "$simulation" >&2
+    return 1
+  fi
+  if ! kernel_cleanup_simulation_matches_candidates "$simulation" "$@"; then
+    printf '%s\n' "$simulation" >&2
+    return 1
+  fi
+}
+
+kernel_cleanup_purge_candidates() {
+  local package plan_status
+  local -a requested_candidates=("${KERNEL_CLEANUP_CANDIDATES[@]}")
+  ((${#KERNEL_CLEANUP_CANDIDATES[@]} > 0)) || return 1
+  kernel_cleanup_build_plan
+  plan_status=$?
+  if ((plan_status != 0)) || [[ "${requested_candidates[*]}" != "${KERNEL_CLEANUP_CANDIDATES[*]}" ]]; then
+    printf '[错误] 确认后系统内核或软件包状态发生变化；为安全起见已取消，没有删除任何软件包。\n' >&2
+    return 1
+  fi
+  if ! kernel_cleanup_validate_simulation "${KERNEL_CLEANUP_CANDIDATES[@]}"; then
+    printf '[错误] APT 模拟删除没有通过严格校验；没有删除任何软件包。\n' >&2
+    return 1
+  fi
+  printf '[通过] APT 模拟仅删除已列出的旧内核，没有牵连其他软件包。\n'
+  if ! run_root env DEBIAN_FRONTEND=noninteractive apt-get -y -o DPkg::Lock::Timeout=0 purge "${KERNEL_CLEANUP_CANDIDATES[@]}"; then
+    printf '[错误] 旧内核清理失败；请检查上面的 APT/dpkg 输出。\n' >&2
+    return 1
+  fi
+  for package in "${KERNEL_CLEANUP_CANDIDATES[@]}"; do
+    if installed "$package"; then
+      printf '[错误] %s 仍处于已安装状态。\n' "$package" >&2
+      return 1
+    fi
+  done
+  printf '[通过] 已清理 %d 个旧内核；没有运行 autoremove，也没有删除其他软件包。\n' "${#KERNEL_CLEANUP_CANDIDATES[@]}"
 }
 
 cleanup_temp_files() {
@@ -893,6 +1182,286 @@ auto_update_settings_menu() {
   done
 }
 
+is_managed_kernel_cleanup_file() {
+  local path="$1" first_line="" second_line=""
+  [[ -f "$path" && -r "$path" ]] || return 1
+  {
+    IFS= read -r first_line || true
+    IFS= read -r second_line || true
+  } <"$path"
+  if [[ "$path" == "$KERNEL_CLEANUP_HELPER" ]]; then
+    [[ "$first_line" == '#!/usr/bin/env bash' && "$second_line" == "# $KERNEL_CLEANUP_MARKER. Do not edit this file by hand." ]]
+  else
+    [[ "$first_line" == "# $KERNEL_CLEANUP_MARKER. Do not edit this file by hand." ]]
+  fi
+}
+
+check_kernel_cleanup_paths_safe() {
+  local path
+  for path in "$KERNEL_CLEANUP_HELPER" "$KERNEL_CLEANUP_SERVICE" "$KERNEL_CLEANUP_TIMER"; do
+    if [[ -e "$path" ]] && ! is_managed_kernel_cleanup_file "$path"; then
+      printf '错误：%s 已存在但不是本脚本创建的文件，拒绝覆盖或删除。\n' "$path" >&2
+      return 1
+    fi
+  done
+}
+
+render_kernel_cleanup_helper() {
+  local helper_functions
+  helper_functions="$(declare -f have run_root installed is_official_debian_kernel_source kernel_dependency_candidates installed_kernel_target_for_meta installed_kernel_meta_records matching_kernel_meta_record classify_kernel_cleanup_records kernel_cleanup_build_plan kernel_cleanup_print_plan kernel_cleanup_simulation_matches_candidates kernel_cleanup_validate_simulation kernel_cleanup_purge_candidates)"
+  cat <<EOF
+#!/usr/bin/env bash
+# $KERNEL_CLEANUP_MARKER. Do not edit this file by hand.
+set -u
+set -o pipefail
+
+KERNEL_CLEANUP_MIN_AGE_DAYS=$KERNEL_CLEANUP_MIN_AGE_DAYS
+
+$helper_functions
+
+if ((EUID != 0)); then
+  printf '[错误] 旧内核自动清理必须以 root 运行。\n' >&2
+  exit 1
+fi
+if ! command -v flock >/dev/null 2>&1; then
+  printf '[错误] 缺少 flock，旧内核自动清理已停止。\n' >&2
+  exit 1
+fi
+exec 9>/run/debian-security-check-kernel-cleanup.lock
+if ! flock -n 9; then
+  printf '[信息] 另一个旧内核清理任务正在运行，本次跳过。\n'
+  exit 0
+fi
+
+kernel_cleanup_build_plan
+PLAN_STATUS=\$?
+kernel_cleanup_print_plan
+case "\$PLAN_STATUS" in
+  0) kernel_cleanup_purge_candidates ;;
+  3) printf '[通过] 本周没有符合全部安全条件的旧内核，未删除任何软件包。\n'; exit 0 ;;
+  *) printf '[错误] 安全前置检查未通过，未删除任何软件包。\n' >&2; exit 1 ;;
+esac
+EOF
+}
+
+render_kernel_cleanup_service() {
+  cat <<EOF
+# $KERNEL_CLEANUP_MARKER. Do not edit this file by hand.
+[Unit]
+Description=Safely purge old Debian kernels managed by debian-security-check
+Documentation=https://github.com/elonjack/debian-security-check
+After=apt-daily.service apt-daily-upgrade.service debian-security-check-auto-update.service
+
+[Service]
+Type=oneshot
+ExecStart=$KERNEL_CLEANUP_HELPER
+TimeoutStartSec=1h
+UMask=0022
+EOF
+}
+
+render_kernel_cleanup_timer() {
+  cat <<EOF
+# $KERNEL_CLEANUP_MARKER. Do not edit this file by hand.
+[Unit]
+Description=Check for safely removable old Debian kernels every week
+
+[Timer]
+OnCalendar=Sun *-*-* 04:15:00
+AccuracySec=1min
+RandomizedDelaySec=30m
+Unit=debian-security-check-kernel-cleanup.service
+
+[Install]
+WantedBy=timers.target
+EOF
+}
+
+enable_weekly_kernel_cleanup() {
+  local helper_tmp service_tmp timer_tmp os_id os_version path preflight_status
+  if [[ ! -r /etc/os-release ]]; then
+    printf '错误：找不到 /etc/os-release。\n' >&2
+    return 1
+  fi
+  os_id="$(awk -F= '$1 == "ID" {gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release)"
+  os_version="$(awk -F= '$1 == "VERSION_ID" {gsub(/^"|"$/, "", $2); print $2; exit}' /etc/os-release)"
+  if [[ "$os_id" != "debian" || ("$os_version" != "12" && "$os_version" != "13") ]]; then
+    printf '错误：每周旧内核清理只支持 Debian 12/13。\n' >&2
+    return 1
+  fi
+  if { have systemd-detect-virt && systemd-detect-virt --quiet --container; } || [[ -e /.dockerenv || -e /run/.containerenv ]]; then
+    printf '错误：容器内核由宿主机控制，不能开启容器内旧内核清理。\n' >&2
+    return 1
+  fi
+  if ! have systemctl || ! have systemd-analyze || ! have flock || [[ ! -d /run/systemd/system ]]; then
+    printf '错误：缺少可用的 systemd、systemd-analyze 或 flock，无法创建安全定时任务。\n' >&2
+    return 1
+  fi
+  if ((EUID != 0)) && ! have sudo; then
+    printf '错误：开启定时任务需要 root 权限，且系统没有 sudo。\n' >&2
+    return 1
+  fi
+  kernel_cleanup_build_plan
+  preflight_status=$?
+  if ((preflight_status == 2)); then
+    printf '错误：开启前的安全检查未通过：%s\n' "$KERNEL_CLEANUP_REASON" >&2
+    return 1
+  fi
+  check_kernel_cleanup_paths_safe || return 1
+
+  new_temp_file || return 1
+  helper_tmp="$NEW_TEMP_FILE"
+  render_kernel_cleanup_helper >"$helper_tmp" || return 1
+  new_temp_file || return 1
+  service_tmp="$NEW_TEMP_FILE"
+  render_kernel_cleanup_service >"$service_tmp" || return 1
+  new_temp_file || return 1
+  timer_tmp="$NEW_TEMP_FILE"
+  render_kernel_cleanup_timer >"$timer_tmp" || return 1
+  bash -n "$helper_tmp" || { printf '错误：旧内核清理执行器语法校验失败。\n' >&2; return 1; }
+
+  if ! run_root install -o root -g root -m 0755 "$helper_tmp" "$KERNEL_CLEANUP_HELPER" ||
+     ! run_root install -o root -g root -m 0644 "$service_tmp" "$KERNEL_CLEANUP_SERVICE" ||
+     ! run_root install -o root -g root -m 0644 "$timer_tmp" "$KERNEL_CLEANUP_TIMER"; then
+    printf '错误：无法安装旧内核清理定时任务文件。\n' >&2
+    return 1
+  fi
+  if ! run_root systemd-analyze verify "$KERNEL_CLEANUP_SERVICE" "$KERNEL_CLEANUP_TIMER" ||
+     ! run_root systemctl daemon-reload ||
+     ! run_root systemctl enable --now debian-security-check-kernel-cleanup.timer; then
+    printf '错误：无法校验或启用旧内核清理定时器；正在关闭定时器。\n' >&2
+    run_root systemctl disable --now debian-security-check-kernel-cleanup.timer >/dev/null 2>&1 || true
+    return 1
+  fi
+  for path in "$KERNEL_CLEANUP_HELPER" "$KERNEL_CLEANUP_SERVICE" "$KERNEL_CLEANUP_TIMER"; do
+    if ! is_managed_kernel_cleanup_file "$path"; then
+      printf '错误：安装后的受管文件校验失败：%s\n' "$path" >&2
+      run_root systemctl disable --now debian-security-check-kernel-cleanup.timer >/dev/null 2>&1 || true
+      return 1
+    fi
+  done
+  printf '[通过] 已开启每周旧内核安全清理：每周日 04:15 后的30分钟随机窗口检查。\n'
+  printf '[信息] 只有三个及以上同系列内核，且第三个或更旧内核安装满 %d 天时才会删除。\n' "$KERNEL_CLEANUP_MIN_AGE_DAYS"
+}
+
+disable_weekly_kernel_cleanup() {
+  local path
+  check_kernel_cleanup_paths_safe || return 1
+  if have systemctl && [[ -d /run/systemd/system ]]; then
+    run_root systemctl disable --now debian-security-check-kernel-cleanup.timer >/dev/null 2>&1 || true
+  fi
+  for path in "$KERNEL_CLEANUP_HELPER" "$KERNEL_CLEANUP_SERVICE" "$KERNEL_CLEANUP_TIMER"; do
+    if [[ -e "$path" ]]; then
+      run_root rm -f -- "$path" || return 1
+    fi
+  done
+  if have systemctl && [[ -d /run/systemd/system ]]; then
+    run_root systemctl daemon-reload || return 1
+  fi
+  printf '[通过] 已关闭并移除本脚本的每周旧内核清理任务。\n'
+  printf '[信息] 没有删除任何内核或其他软件包。\n'
+}
+
+show_kernel_cleanup_timer_status() {
+  local timer_state="未安装"
+  if have systemctl && [[ -d /run/systemd/system ]]; then
+    timer_state="$(systemctl is-enabled debian-security-check-kernel-cleanup.timer 2>/dev/null || true)"
+  fi
+  if [[ "$timer_state" == "enabled" ]] &&
+     is_managed_kernel_cleanup_file "$KERNEL_CLEANUP_HELPER" &&
+     is_managed_kernel_cleanup_file "$KERNEL_CLEANUP_SERVICE" &&
+     is_managed_kernel_cleanup_file "$KERNEL_CLEANUP_TIMER"; then
+    printf '[通过] 每周自动清理已开启：周日 04:15 后的30分钟随机窗口检查。\n'
+    if systemctl is-failed --quiet debian-security-check-kernel-cleanup.service 2>/dev/null; then
+      printf '[警告] 上一次自动清理失败；请查看：journalctl -u debian-security-check-kernel-cleanup.service\n'
+    fi
+  elif [[ -e "$KERNEL_CLEANUP_HELPER" || -e "$KERNEL_CLEANUP_SERVICE" || -e "$KERNEL_CLEANUP_TIMER" ]]; then
+    printf '[信息] 每周自动清理未启用；检测到已停用或不完整的任务文件。\n'
+  else
+    printf '[信息] 每周自动清理未开启。\n'
+  fi
+}
+
+inspect_kernel_cleanup_candidates() {
+  local status
+  kernel_cleanup_build_plan
+  status=$?
+  kernel_cleanup_print_plan
+  case "$status" in
+    0) printf '[信息] 以上“候选”仅供查看，本次没有删除任何软件包。\n' ;;
+    3) printf '[通过] 当前没有符合全部安全条件的旧内核。\n' ;;
+    *) printf '[错误] 安全前置检查未通过，本次没有删除任何软件包。\n' >&2 ;;
+  esac
+  return "$status"
+}
+
+run_manual_kernel_cleanup() (
+  local status answer cleanup_lock_fd
+  if ! have flock; then
+    printf '[错误] 缺少 flock，无法安全执行旧内核清理。\n' >&2
+    return 1
+  fi
+  exec {cleanup_lock_fd}>/run/debian-security-check-kernel-cleanup.lock || return 1
+  if ! flock -n "$cleanup_lock_fd"; then
+    printf '[错误] 另一个旧内核清理任务正在运行，本次没有删除任何软件包。\n' >&2
+    return 1
+  fi
+  kernel_cleanup_build_plan
+  status=$?
+  kernel_cleanup_print_plan
+  case "$status" in
+    0) ;;
+    3) printf '[通过] 当前没有符合全部安全条件的旧内核，未删除任何软件包。\n'; return 0 ;;
+    *) printf '[错误] 安全前置检查未通过，未删除任何软件包。\n' >&2; return 1 ;;
+  esac
+  printf '%s确认只清理上面的 %d 个“候选”旧内核吗？[y/N]：%s' "$C_YELLOW" "${#KERNEL_CLEANUP_CANDIDATES[@]}" "$C_RESET"
+  read -r answer || return 1
+  case "$answer" in
+    y|Y|yes|YES) ;;
+    *) printf '已取消，没有删除任何软件包。\n'; return 0 ;;
+  esac
+  kernel_cleanup_purge_candidates
+)
+
+pause_for_kernel_cleanup_menu() {
+  printf '\n%s按回车键返回旧内核清理菜单……%s' "$C_YELLOW" "$C_RESET"
+  read -r _KERNEL_MENU_PAUSE || true
+}
+
+kernel_cleanup_settings_menu() {
+  local choice script_path
+  script_path="$(readlink -f -- "$0" 2>/dev/null || printf '%s' "$0")"
+  while true; do
+    printf '\n%s%s旧内核安全清理（默认关闭）%s\n' "$C_BOLD" "$C_YELLOW" "$C_RESET"
+    printf '%s规则：只处理当前系列；保留当前最新内核和一个备用；第三个及更旧且满 %d 天才清理。%s\n' "$C_YELLOW" "$KERNEL_CLEANUP_MIN_AGE_DAYS" "$C_RESET"
+    printf '\n%s%s%s\n' "$C_YELLOW" '  1) 查看可清理的旧内核（只检查，不删除）' "$C_RESET"
+    printf '%s%s%s\n' "$C_YELLOW" '  2) 立即安全清理一次（仍然遵守30天和保留规则）' "$C_RESET"
+    printf '%s%s%s\n' "$C_YELLOW" '  3) 开启每周自动检查和清理（周日低峰执行）' "$C_RESET"
+    printf '%s%s%s\n' "$C_YELLOW" '  4) 关闭每周自动清理' "$C_RESET"
+    printf '%s%s%s\n' "$C_YELLOW" '  5) 查看每周自动清理状态' "$C_RESET"
+    printf '%s%s%s\n' "$C_YELLOW" '  0) 返回主菜单' "$C_RESET"
+    printf '\n%s请选择 [1/2/3/4/5/0]：%s' "$C_YELLOW" "$C_RESET"
+    if ! read -r choice; then
+      printf '\n未读取到选择，已退出。\n' >&2
+      return 2
+    fi
+    case "$choice" in
+      1) inspect_kernel_cleanup_candidates || true; pause_for_kernel_cleanup_menu ;;
+      2) run_manual_kernel_cleanup || true; pause_for_kernel_cleanup_menu ;;
+      3) enable_weekly_kernel_cleanup || true; pause_for_kernel_cleanup_menu ;;
+      4) disable_weekly_kernel_cleanup || true; pause_for_kernel_cleanup_menu ;;
+      5) show_kernel_cleanup_timer_status; pause_for_kernel_cleanup_menu ;;
+      0)
+        if [[ -r /dev/tty && -f "$script_path" ]]; then
+          exec bash "$script_path" </dev/tty
+        fi
+        return 0
+        ;;
+      *) printf '输入无效，请输入 1、2、3、4、5 或 0。\n' >&2 ;;
+    esac
+  done
+}
+
 query_upgradable_packages() {
   local output error_log
   new_temp_file || { blocker "无法创建 APT 查询临时文件。"; return 1; }
@@ -910,7 +1479,7 @@ should_auto_reboot() {
 }
 
 run_self_test() {
-  local test_dir output config_output helper_test failed=0
+  local test_dir output config_output helper_test cleanup_helper_test failed=0
   test_dir="$(mktemp -d -t debian-security-check-test.XXXXXX)" || return 1
   mkdir -p "$test_dir/sources.list.d"
 
@@ -969,6 +1538,44 @@ EOF
     failed=1
   fi
 
+  output="$(classify_kernel_cleanup_records linux-image-6.12.115+deb13.1-amd64 10000000 30 <<'EOF'
+linux-image-6.12.107+deb13-amd64|6.12.107-1|4816000
+linux-image-6.12.113+deb13-amd64|6.12.113-1|6544000
+linux-image-6.12.115+deb13.1-amd64|6.12.115-2|9568000
+EOF
+)"
+  if ! grep -Fq 'candidate|linux-image-6.12.107+deb13-amd64|6.12.107-1|4816000|60' <<<"$output" ||
+     ! grep -Fq 'fallback|linux-image-6.12.113+deb13-amd64|6.12.113-1|6544000|40' <<<"$output" ||
+     ! grep -Fq 'current|linux-image-6.12.115+deb13.1-amd64|6.12.115-2|9568000|5' <<<"$output"; then
+    printf '%s\n' 'SELF-TEST FAIL: 三个内核时的保留和候选分类错误。' >&2
+    failed=1
+  fi
+  output="$(classify_kernel_cleanup_records linux-image-6.12.115+deb13.1-amd64 10000000 30 <<'EOF'
+linux-image-6.12.113+deb13-amd64|6.12.113-1|4816000
+linux-image-6.12.115+deb13.1-amd64|6.12.115-2|9568000
+EOF
+)"
+  if grep -q '^candidate|' <<<"$output"; then
+    printf '%s\n' 'SELF-TEST FAIL: 只有两个内核时错误地产生了清理候选。' >&2
+    failed=1
+  fi
+  output="$(classify_kernel_cleanup_records linux-image-6.12.115+deb13.1-amd64 10000000 30 <<'EOF'
+linux-image-6.12.107+deb13-amd64|6.12.107-1|8272000
+linux-image-6.12.113+deb13-amd64|6.12.113-1|6544000
+linux-image-6.12.115+deb13.1-amd64|6.12.115-2|9568000
+EOF
+)"
+  if ! grep -Fq 'young|linux-image-6.12.107+deb13-amd64|6.12.107-1|8272000|20' <<<"$output" || grep -q '^candidate|' <<<"$output"; then
+    printf '%s\n' 'SELF-TEST FAIL: 未满30天的第三个内核被错误列为候选。' >&2
+    failed=1
+  fi
+  if ! kernel_cleanup_simulation_matches_candidates $'Remv linux-image-6.12.107+deb13-amd64 [6.12.107-1]\n' linux-image-6.12.107+deb13-amd64 ||
+     kernel_cleanup_simulation_matches_candidates $'Remv linux-image-6.12.107+deb13-amd64 [6.12.107-1]\nRemv linux-image-amd64 [6.12.115-2]\n' linux-image-6.12.107+deb13-amd64 ||
+     kernel_cleanup_simulation_matches_candidates $'Inst unrelated-package (1.0 Debian:stable [amd64])\nRemv linux-image-6.12.107+deb13-amd64 [6.12.107-1]\n' linux-image-6.12.107+deb13-amd64; then
+    printf '%s\n' 'SELF-TEST FAIL: APT 模拟删除白名单校验错误。' >&2
+    failed=1
+  fi
+
   UPGRADE_FAILED=0 BLOCKERS=0 CRITICALS=0 PATCH_RECOMMENDED=0 REBOOT_RECOMMENDED=1
   should_auto_reboot || { printf '%s\n' 'SELF-TEST FAIL: 安全重启条件未通过。' >&2; failed=1; }
   UPGRADE_FAILED=1
@@ -1017,6 +1624,24 @@ EOF
     failed=1
   fi
 
+  cleanup_helper_test="$test_dir/kernel-cleanup-helper"
+  render_kernel_cleanup_helper >"$cleanup_helper_test"
+  if ! bash -n "$cleanup_helper_test" ||
+     [[ "$(head -n 1 "$cleanup_helper_test")" != '#!/usr/bin/env bash' ]] ||
+     ! grep -Fxq 'KERNEL_CLEANUP_MIN_AGE_DAYS=30' "$cleanup_helper_test" ||
+     ! grep -Fq 'kernel_cleanup_build_plan' "$cleanup_helper_test" ||
+     ! grep -Fq 'kernel_cleanup_purge_candidates' "$cleanup_helper_test" ||
+     ! grep -Fq 'flock -n 9' "$cleanup_helper_test"; then
+    printf '%s\n' 'SELF-TEST FAIL: 每周旧内核清理执行器不完整或语法错误。' >&2
+    failed=1
+  fi
+  config_output="$(render_kernel_cleanup_timer)"
+  if ! grep -Fxq 'OnCalendar=Sun *-*-* 04:15:00' <<<"$config_output" ||
+     ! grep -Fxq 'RandomizedDelaySec=30m' <<<"$config_output"; then
+    printf '%s\n' 'SELF-TEST FAIL: 每周旧内核清理定时器配置错误。' >&2
+    failed=1
+  fi
+
   config_output="$(render_auto_update_config disabled)"
   if ! grep -Fxq 'APT::Periodic::Unattended-Upgrade "0";' <<<"$config_output" ||
      ! grep -Fxq 'Unattended-Upgrade::Automatic-Reboot "false";' <<<"$config_output"; then
@@ -1024,7 +1649,7 @@ EOF
     failed=1
   fi
 
-  rm -f -- "$test_dir/sources.list.d/ignored.list.save" "$test_dir/sources.list.d/disabled.sources" "$test_dir/sources.list.d/active.sources" "$helper_test"
+  rm -f -- "$test_dir/sources.list.d/ignored.list.save" "$test_dir/sources.list.d/disabled.sources" "$test_dir/sources.list.d/active.sources" "$helper_test" "$cleanup_helper_test"
   rmdir -- "$test_dir/sources.list.d" "$test_dir"
 
   if ((failed)); then return 1; fi
@@ -1041,6 +1666,11 @@ export LANG=C
 
 if [[ "$MODE" == "auto-settings" ]]; then
   auto_update_settings_menu
+  exit $?
+fi
+
+if [[ "$MODE" == "kernel-cleanup-settings" ]]; then
+  kernel_cleanup_settings_menu
   exit $?
 fi
 

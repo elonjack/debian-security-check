@@ -2,7 +2,7 @@
 
 面向 Debian 12（Bookworm）和 Debian 13（Trixie）的安全检查与保守更新脚本。
 
-交互菜单同时提供“一次性智能检查修复”和“长期自动安全更新设置”。一次性模式先完整检查，只有发现可安装更新且没有安全阻断项时，才先模拟再正式更新；长期模式由用户明确开启后，在指定时间只安装 Debian 官方安全仓库允许的更新，并可选择是否在更新成功且确实需要时自动重启。默认不会自动开启长期功能。高级用户仍可用 `--check` / `--fix` 参数执行不会自动重启的检查或更新。
+交互菜单同时提供“一次性智能检查修复”“长期自动安全更新设置”和“旧内核安全清理”。一次性模式先完整检查，只有发现可安装更新且没有安全阻断项时，才先模拟再正式更新；长期模式由用户明确开启后，在指定时间只安装 Debian 官方安全仓库允许的更新，并可选择是否在更新成功且确实需要时自动重启。旧内核清理同样默认关闭，只有三个及以上同系列内核时才可能清理第三个或更旧且安装满30天的内核。高级用户仍可用 `--check` / `--fix` 参数执行不会自动重启的检查或更新。
 
 ## 安装与运行
 
@@ -11,15 +11,15 @@
 在 Debian VPS 或独立服务器上运行：
 
 ```bash
-curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.4.1/install.sh | bash
+curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.5.0/install.sh | bash
 ```
 
 安装器会自动：
 
-1. 从 `v1.4.1` GitHub Release 下载正式脚本和 `SHA256SUMS`。
+1. 从 `v1.5.0` GitHub Release 下载正式脚本和 `SHA256SUMS`。
 2. 校验脚本 SHA-256；不一致就停止，不会执行。
 3. 安装到 `$HOME/debian-security-check/`。
-4. 恢复终端输入并打开 `1/2/0` 中文菜单。
+4. 恢复终端输入并打开 `1/2/3/0` 中文菜单。
 
 ### 手动下载并校验（可选）
 
@@ -27,9 +27,9 @@ curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v
 
 ```bash
 curl -fL -o debian-security-check.sh \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.4.1/debian-security-check.sh
+  https://github.com/elonjack/debian-security-check/releases/download/v1.5.0/debian-security-check.sh
 curl -fL -o SHA256SUMS \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.4.1/SHA256SUMS
+  https://github.com/elonjack/debian-security-check/releases/download/v1.5.0/SHA256SUMS
 grep '  debian-security-check.sh$' SHA256SUMS | sha256sum -c -
 ```
 
@@ -64,6 +64,8 @@ root 用户也可以去掉 `sudo`。不要把主脚本 `debian-security-check.sh
 - 可单独开启长期自动安全更新，并选择“不自动重启”或“更新完整成功后确需重启才自动重启”
 - 长期模式清空默认更新来源，只允许 Debian 官方 `Debian-Security` 来源，不自动更新第三方仓库
 - 长期模式禁止自动删包、自动降级和关机时升级；有登录用户时不自动重启
+- 可选的旧内核清理始终保留当前最新内核和一个最近备用；只清理第三个或更旧且安装满30天的同系列内核
+- 旧内核清理先执行 APT 模拟，删除方案出现任何未列入候选的软件包就停止；不会运行宽泛的 `autoremove`
 - 禁用/备份的 APT 源不会被误判为有效安全源；混入 testing/sid 时阻止自动更新
 - 升级失败、仍有补丁或存在严重问题时绝不自动重启
 - `--fix` 使用不会主动删除软件包的保守更新方式，且不会自动重启
@@ -81,10 +83,11 @@ sudo bash "$HOME/debian-security-check/debian-security-check.sh"
 ```text
 1) 智能检查并修复（有更新才安装，需要时自动重启）
 2) 自动安全更新设置（长期生效，默认不会自动开启）
+3) 旧内核安全清理（默认关闭，始终保留当前和一个备用）
 0) 退出
 ```
 
-选择 `1` 即可完成本次“检查 → 必要时更新 → 必要时重启”的流程，不再需要把检查结果发给别人判断，也不用再次选择修复选项。选择 `2` 才会进入长期自动更新设置；脚本不会自行开启。
+选择 `1` 即可完成本次“检查 → 必要时更新 → 必要时重启”的流程，不再需要把检查结果发给别人判断，也不用再次选择修复选项。选择 `2` 才会进入长期自动更新设置；选择 `3` 管理旧内核清理。两个长期功能都不会自行开启。
 
 执行流程如下：
 
@@ -198,6 +201,47 @@ sudo bash "$HOME/debian-security-check/debian-security-check.sh"
 选择 `4` 会停用本脚本定时器，并用本脚本配置明确关闭 APT 自带的无人值守安装和自动重启，但保留软件包、管理文件及日志；选择 `5` 只删除本脚本创建的上述四个管理文件，使结果重新由机器上其他 APT 配置决定。两项操作都不会卸载软件或删除已安装更新。
 
 长期模式只处理 Debian Security 来源。仍建议定期运行主菜单选项 `1`，检查普通 stable 更新、被 hold 的包、运行中内核以及自动任务失败记录。
+
+## 旧内核安全清理
+
+在主菜单选择 `3`：
+
+```text
+1) 查看可清理的旧内核（只检查，不删除）
+2) 立即安全清理一次（仍然遵守30天和保留规则）
+3) 开启每周自动检查和清理（周日低峰执行）
+4) 关闭每周自动清理
+5) 查看每周自动清理状态
+0) 返回主菜单
+```
+
+此功能默认关闭。选项 `2` 只执行一次；选项 `3` 由用户主动开启后，每周日服务器本地时间 `04:15` 后的30分钟随机窗口检查一次。每周执行的是安全检查，不代表每周一定会删除内核。
+
+候选内核必须同时满足以下条件：
+
+- 机器是 Debian 12/13 的完整虚拟机或物理机，不是 LXC、OpenVZ、Docker 等容器。
+- 当前运行内核属于 Debian 官方包，并且已经是对应内核元包指向的最新内核；如果新内核已安装但尚未重启，整个清理流程停止。
+- 只统计当前内核元包对应的同系列内核；普通 `amd64`、`cloud-amd64`、RT 等系列不会混在一起计数或删除。
+- 同系列至少存在三个内核。
+- 当前运行的最新内核始终保留，版本最高的另一个内核作为备用始终保留。
+- 只有第三个或更旧的内核，并且 Debian `dpkg` 记录的包文件最后变更时间至少已满30天，才列为候选；时间无法确认时保留。
+- `dpkg --audit`、`apt-get check` 必须通过，不能有 hold 包，APT 也不能正被其他任务占用。
+
+真正删除前，脚本会执行 `apt-get -s purge` 模拟。模拟结果只要包含候选列表以外的软件包，或计划安装其他软件包，就立即停止。正式操作只 purge 已列出的版本化 `linux-image-*` 旧内核包，不运行 `apt autoremove`，不删除内核元包、当前内核、备用内核或其他软件包。与旧内核配套但独立安装的旧 headers 可能继续保留，这是为了避免宽泛自动删除。
+
+每周任务由以下受管文件组成：
+
+```text
+/usr/local/sbin/debian-security-check-kernel-cleanup
+/etc/systemd/system/debian-security-check-kernel-cleanup.service
+/etc/systemd/system/debian-security-check-kernel-cleanup.timer
+```
+
+选择 `4` 会停止定时器并移除这三个受管文件，但不会删除任何内核。自动任务日志可用下面的命令查看：
+
+```bash
+journalctl -u debian-security-check-kernel-cleanup.service
+```
 
 ## 自动化和批量服务器
 
