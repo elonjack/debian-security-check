@@ -6,7 +6,7 @@
 set -u
 set -o pipefail
 
-SCRIPT_VERSION="1.4.0"
+SCRIPT_VERSION="1.4.1"
 MODE="check"
 INTERACTIVE_MENU=0
 REFRESH_APT=1
@@ -139,6 +139,106 @@ run_root() {
 
 installed() {
   [[ "$(dpkg-query -W -f='${db:Status-Abbrev}' "$1" 2>/dev/null || true)" == ii* ]]
+}
+
+is_official_debian_kernel_source() {
+  case "$1" in
+    linux|linux-[0-9]*|linux-signed-amd64|linux-signed-arm64|linux-signed-i386) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+kernel_dependency_candidates() {
+  local dependency_text="$1"
+  grep -oE 'linux-image-[0-9][[:alnum:].+~_-]*(:[[:alnum:]_-]+)?' <<<"$dependency_text" |
+    sed -E 's/:[[:alnum:]_-]+$//' |
+    awk '!seen[$0]++'
+}
+
+installed_kernel_target_for_meta() {
+  local meta_package="$1"
+  local dependencies candidate query status source source_version binary_version
+  local best_package="" best_version="" best_source="" best_source_version=""
+
+  dependencies="$(dpkg-query -W -f='${Depends}, ${Pre-Depends}' "$meta_package" 2>/dev/null || true)"
+  [[ -n "$dependencies" ]] || return 1
+
+  while IFS= read -r candidate; do
+    [[ -n "$candidate" ]] || continue
+    query="$(dpkg-query -W -f='${db:Status-Abbrev}|${source:Package}|${source:Version}|${Version}' "$candidate" 2>/dev/null || true)"
+    IFS='|' read -r status source source_version binary_version <<<"$query"
+    [[ "$status" == ii* && -n "$binary_version" ]] || continue
+    [[ -n "$source" ]] || source="$candidate"
+    [[ -n "$source_version" ]] || source_version="$binary_version"
+    if [[ -z "$best_package" ]] || dpkg --compare-versions "$binary_version" gt "$best_version"; then
+      best_package="$candidate"
+      best_version="$binary_version"
+      best_source="$source"
+      best_source_version="$source_version"
+    fi
+  done < <(kernel_dependency_candidates "$dependencies")
+
+  [[ -n "$best_package" ]] || return 1
+  printf '%s|%s|%s|%s\n' "$best_package" "$best_version" "$best_source" "$best_source_version"
+}
+
+installed_kernel_meta_records() {
+  local query status package meta_version target
+  query="$(dpkg-query -W -f='${db:Status-Abbrev}|${binary:Package}|${Version}\n' 'linux-image-*' 2>/dev/null || true)"
+  while IFS='|' read -r status package meta_version; do
+    [[ "$status" == ii* ]] || continue
+    package="${package%%:*}"
+    [[ "$package" == linux-image-* && "$package" != linux-image-[0-9]* ]] || continue
+    target="$(installed_kernel_target_for_meta "$package" 2>/dev/null || true)"
+    [[ -n "$target" ]] || continue
+    printf '%s|%s|%s\n' "$package" "$meta_version" "$target"
+  done <<<"$query"
+}
+
+matching_kernel_meta_record() {
+  local running_release="$1"
+  local record meta_package meta_version target_package target_version target_source target_source_version flavor
+  local best_record="" best_length=-1
+
+  while IFS= read -r record; do
+    [[ -n "$record" ]] || continue
+    IFS='|' read -r meta_package meta_version target_package target_version target_source target_source_version <<<"$record"
+    flavor="${meta_package#linux-image-}"
+    if [[ "$running_release" == *-"$flavor" && ${#flavor} -gt $best_length ]]; then
+      best_record="$meta_package|$meta_version|$target_package|$target_version|$target_source|$target_source_version"
+      best_length=${#flavor}
+    fi
+  done
+
+  [[ -n "$best_record" ]] || return 1
+  printf '%s\n' "$best_record"
+}
+
+kernel_target_requires_reboot() {
+  local running_package="$1" running_version="$2" target_package="$3" target_version="$4"
+  [[ "$target_package" != "$running_package" ]] || return 1
+  dpkg --compare-versions "$target_version" ge "$running_version"
+}
+
+pending_newer_kernel_target() {
+  local running_release="${1:-$(uname -r)}"
+  local running_package="linux-image-$running_release"
+  local running_query running_status running_source running_version
+  local records matching target_package target_version target_source
+
+  running_query="$(dpkg-query -W -f='${db:Status-Abbrev}|${source:Package}|${source:Version}|${Version}' "$running_package" 2>/dev/null || true)"
+  IFS='|' read -r running_status running_source _ running_version <<<"$running_query"
+  [[ "$running_status" == ii* && -n "$running_version" ]] || return 1
+  is_official_debian_kernel_source "$running_source" || return 1
+
+  records="$(installed_kernel_meta_records || true)"
+  [[ -n "$records" ]] || return 1
+  matching="$(matching_kernel_meta_record "$running_release" <<<"$records" || true)"
+  [[ -n "$matching" ]] || return 1
+  IFS='|' read -r _ _ target_package target_version target_source _ <<<"$matching"
+  is_official_debian_kernel_source "$target_source" || return 1
+  kernel_target_requires_reboot "$running_package" "$running_version" "$target_package" "$target_version" || return 1
+  printf '%s\n' "$matching"
 }
 
 cleanup_temp_files() {
@@ -300,6 +400,8 @@ EOF
 
 render_auto_update_helper() {
   local config_mode="$1"
+  local kernel_helper_functions
+  kernel_helper_functions="$(declare -f is_official_debian_kernel_source kernel_dependency_candidates installed_kernel_target_for_meta installed_kernel_meta_records matching_kernel_meta_record kernel_target_requires_reboot pending_newer_kernel_target)"
   cat <<EOF
 #!/usr/bin/env bash
 # $AUTO_UPDATE_MARKER. Do not edit this file by hand.
@@ -318,6 +420,8 @@ trap cleanup EXIT
 
 log() { printf '[debian-security-check] %s\\n' "\$*"; }
 
+$kernel_helper_functions
+
 if [[ ! -r /etc/os-release ]]; then
   log "无法识别系统，已停止自动更新。"
   exit 1
@@ -329,7 +433,7 @@ if [[ "\${ID:-}" != "debian" || ("\${VERSION_ID:-}" != "12" && "\${VERSION_ID:-}
   exit 1
 fi
 
-for command_name in apt-config apt-get unattended-upgrade grep mktemp rm sync systemctl users; do
+for command_name in apt-config apt-get awk dpkg dpkg-query grep mktemp rm sed sync systemctl uname users; do
   if ! command -v "\$command_name" >/dev/null 2>&1; then
     log "缺少必要命令：\$command_name"
     exit 1
@@ -353,6 +457,7 @@ umask 077
 RUN_MARKER="\$(mktemp /run/debian-security-check-auto-update.XXXXXX)" || exit 1
 export DEBIAN_FRONTEND=noninteractive
 export NEEDRESTART_MODE=a
+KERNEL_TARGET_BEFORE="\$(pending_newer_kernel_target 2>/dev/null || true)"
 
 log "开始刷新全部 APT 软件源索引。"
 if ! apt-get update -o APT::Update::Error-Mode=any; then
@@ -366,12 +471,21 @@ if ! unattended-upgrade; then
   exit 1
 fi
 log "安全更新执行成功。"
+KERNEL_TARGET_AFTER="\$(pending_newer_kernel_target 2>/dev/null || true)"
 
 if [[ "\$MODE" != "enabled-reboot" ]]; then
   exit 0
 fi
-if [[ ! -f /run/reboot-required || ! /run/reboot-required -nt "\$RUN_MARKER" ]]; then
-  log "本次更新没有新产生重启要求，不重启。"
+NEW_REBOOT_MARKER=0
+NEW_KERNEL_TARGET=0
+if [[ -f /run/reboot-required && /run/reboot-required -nt "\$RUN_MARKER" ]]; then
+  NEW_REBOOT_MARKER=1
+fi
+if [[ -n "\$KERNEL_TARGET_AFTER" && "\$KERNEL_TARGET_AFTER" != "\$KERNEL_TARGET_BEFORE" ]]; then
+  NEW_KERNEL_TARGET=1
+fi
+if ((NEW_REBOOT_MARKER == 0 && NEW_KERNEL_TARGET == 0)); then
+  log "本次更新没有新产生重启要求，也没有安装尚未启用的新内核，不重启。"
   exit 0
 fi
 LOGGED_IN_USERS="\$(users 2>/dev/null || true)"
@@ -380,7 +494,10 @@ if [[ -n "\$LOGGED_IN_USERS" ]]; then
   exit 0
 fi
 
-log "本次安全更新成功并新产生重启要求，现在重启。"
+if ((NEW_KERNEL_TARGET)); then
+  log "本次安全更新安装了尚未启用的新内核。"
+fi
+log "本次安全更新成功并确认需要重启，现在重启。"
 sync
 systemctl reboot
 EOF
@@ -634,7 +751,7 @@ show_auto_update_status() {
         warn "上一次自动安全更新执行失败；请查看：journalctl -u debian-security-check-auto-update.service"
       fi
       if is_managed_auto_update_runtime_file "$AUTO_UPDATE_HELPER" && grep -Fxq 'MODE="enabled-reboot"' "$AUTO_UPDATE_HELPER"; then
-        warn "本次安全更新完整成功并新产生重启要求时，将在无人登录的情况下重启。"
+        warn "本次安全更新完整成功并新产生重启要求或安装新内核时，将在无人登录的情况下重启。"
       elif ! is_managed_auto_update_runtime_file "$AUTO_UPDATE_HELPER"; then
         warn "定时器已启用，但执行文件不是本脚本管理的文件；请立即检查。"
       else
@@ -696,7 +813,7 @@ enable_auto_updates() {
 
   if [[ "$enable_reboot" == "1" ]]; then
     ok "已开启：每天 $reboot_time 自动安装 Debian 官方安全更新。"
-    info "只有本次更新完整成功并新产生重启要求，而且无人登录时，才会立即重启。"
+    info "只有本次更新完整成功并新产生重启要求或安装新内核，而且无人登录时，才会立即重启。"
   else
     ok "已开启：每天 $reboot_time 自动安装 Debian 官方安全更新，不自动重启。"
   fi
@@ -824,6 +941,34 @@ EOF
     failed=1
   fi
 
+  output="$(kernel_dependency_candidates 'linux-image-6.12.115+deb13.1-amd64 (= 6.12.115-2), linux-base (>= 4.12) | linux-image-6.12.113+deb13-amd64:amd64')"
+  if [[ "$output" != $'linux-image-6.12.115+deb13.1-amd64\nlinux-image-6.12.113+deb13-amd64' ]]; then
+    printf '%s\n' 'SELF-TEST FAIL: 无法正确解析内核元包依赖。' >&2
+    failed=1
+  fi
+
+  output="$(matching_kernel_meta_record '6.12.113+deb13-cloud-amd64' <<'EOF'
+linux-image-amd64|6.12.115-2|linux-image-6.12.115+deb13.1-amd64|6.12.115-2|linux-signed-amd64|6.12.115+1
+linux-image-cloud-amd64|6.12.115-2|linux-image-6.12.115+deb13.1-cloud-amd64|6.12.115-2|linux-signed-amd64|6.12.115+1
+EOF
+)"
+  if [[ "$output" != linux-image-cloud-amd64\|* ]]; then
+    printf '%s\n' 'SELF-TEST FAIL: 普通内核与 cloud 内核并存时没有选择正确元包。' >&2
+    failed=1
+  fi
+  if ! is_official_debian_kernel_source linux-signed-amd64 ||
+     ! is_official_debian_kernel_source linux-6.16 ||
+     is_official_debian_kernel_source vendor-kernel; then
+    printf '%s\n' 'SELF-TEST FAIL: Debian 官方内核源包识别错误。' >&2
+    failed=1
+  fi
+  if ! kernel_target_requires_reboot linux-image-6.12.113+deb13-amd64 6.12.113-1 linux-image-6.12.115+deb13.1-amd64 6.12.115-2 ||
+     kernel_target_requires_reboot linux-image-6.12.115+deb13.1-amd64 6.12.115-2 linux-image-6.12.115+deb13.1-amd64 6.12.115-2 ||
+     kernel_target_requires_reboot linux-image-6.12.115+deb13.1-amd64 6.12.115-2 linux-image-6.12.113+deb13-amd64 6.12.113-1; then
+    printf '%s\n' 'SELF-TEST FAIL: 新旧内核重启判断错误。' >&2
+    failed=1
+  fi
+
   UPGRADE_FAILED=0 BLOCKERS=0 CRITICALS=0 PATCH_RECOMMENDED=0 REBOOT_RECOMMENDED=1
   should_auto_reboot || { printf '%s\n' 'SELF-TEST FAIL: 安全重启条件未通过。' >&2; failed=1; }
   UPGRADE_FAILED=1
@@ -858,7 +1003,8 @@ EOF
      [[ "$(head -n 1 "$helper_test")" != '#!/usr/bin/env bash' ]] ||
      ! grep -Fxq 'MODE="enabled-reboot"' "$helper_test" ||
      ! grep -Fq 'if ! unattended-upgrade; then' "$helper_test" ||
-     ! grep -Fq '! /run/reboot-required -nt "$RUN_MARKER"' "$helper_test" ||
+     ! grep -Fq 'KERNEL_TARGET_AFTER="$(pending_newer_kernel_target 2>/dev/null || true)"' "$helper_test" ||
+     ! grep -Fq 'NEW_KERNEL_TARGET=1' "$helper_test" ||
      ! grep -Fq 'systemctl reboot' "$helper_test"; then
     printf '%s\n' 'SELF-TEST FAIL: 受控自动更新执行器不完整或语法错误。' >&2
     failed=1
@@ -903,7 +1049,7 @@ printf '时间：%s\n' "$(date '+%F %T %Z')"
 printf '主机：%s\n' "$(hostname -f 2>/dev/null || hostname)"
 
 section "系统与支持状态"
-for REQUIRED_COMMAND in apt apt-get apt-mark awk dpkg dpkg-query find grep mktemp sed sort; do
+for REQUIRED_COMMAND in apt apt-get apt-mark awk dpkg dpkg-query find grep mktemp sed sort uname; do
   if ! have "$REQUIRED_COMMAND"; then
     blocker "缺少必要命令：$REQUIRED_COMMAND"
   fi
@@ -1041,8 +1187,10 @@ else
   info "未安装 debsecan；可运行：sudo apt-get install debsecan debian-security-support"
 fi
 
-section "CVE-2026-98432 与运行中内核"
+section "运行中内核、最新内核与 CVE-2026-98432"
 RUNNING_RELEASE="$(uname -r)"
+KERNEL_PACKAGE=""
+BINARY_VERSION=""
 info "正在运行：$RUNNING_RELEASE"
 
 if ((IN_CONTAINER)); then
@@ -1064,10 +1212,7 @@ else
     FIXED_DEBIAN=""
     VERSION_IS_FIXED=0
     SOURCE_IS_OFFICIAL=0
-
-    case "$SOURCE_PACKAGE" in
-      linux|linux-6.12|linux-signed-amd64|linux-signed-arm64|linux-signed-i386) SOURCE_IS_OFFICIAL=1 ;;
-    esac
+    if is_official_debian_kernel_source "$SOURCE_PACKAGE"; then SOURCE_IS_OFFICIAL=1; fi
 
     case "$VERSION:$UPSTREAM_VERSION" in
       13:6.12.*)
@@ -1084,7 +1229,7 @@ else
     if ((SOURCE_IS_OFFICIAL == 0)); then
       blocker "运行内核来源 $SOURCE_PACKAGE 不在 Debian 官方内核源包白名单内，不能自动判定 CVE 状态。"
     elif [[ -z "$FIXED_UPSTREAM" ]]; then
-      blocker "该内核分支不在 Debian 12/13 官方修复表内，不能自动判定 CVE 状态。"
+      warn "该官方内核分支不在 CVE-2026-98432 的内置修复表内；仅跳过这个特定 CVE 结论，不影响通用更新和最新内核判断。"
     else
       if [[ "$SOURCE_PACKAGE" == "linux" || "$SOURCE_PACKAGE" == "linux-6.12" ]]; then
         if dpkg --compare-versions "$SOURCE_VERSION" ge "$FIXED_DEBIAN"; then
@@ -1117,10 +1262,7 @@ fi
 INSTALLED_FIXED_KERNEL=0
 while IFS='|' read -r STATUS_ABBR PACKAGE_NAME INSTALLED_SOURCE _INSTALLED_SOURCE_VERSION; do
   [[ "$STATUS_ABBR" == ii* ]] || continue
-  case "$INSTALLED_SOURCE" in
-    linux|linux-6.12|linux-signed-amd64|linux-signed-arm64|linux-signed-i386) ;;
-    *) continue ;;
-  esac
+  is_official_debian_kernel_source "$INSTALLED_SOURCE" || continue
 
   PACKAGE_NAME="${PACKAGE_NAME%%:*}"
   INSTALLED_UPSTREAM="$(sed -nE 's/^linux-image-([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' <<<"$PACKAGE_NAME")"
@@ -1148,12 +1290,37 @@ elif ((KERNEL_UPDATE_NEEDED)); then
   PATCH_RECOMMENDED=1
 fi
 
-META_KERNELS="$(dpkg-query -W -f='${db:Status-Abbrev} ${binary:Package} ${Version}\n' 'linux-image-*' 2>/dev/null | awk '$1 ~ /^ii/ && $2 ~ /^linux-image-(amd64|cloud-amd64|rt-amd64|arm64|cloud-arm64|armmp|powerpc64le|riscv64|s390x)(:[^ ]+)?$/ {print $2, $3}' | sort -u || true)"
+KERNEL_META_RECORDS="$(installed_kernel_meta_records || true)"
+META_KERNELS="$(awk -F'|' 'NF >= 2 {print $1, $2}' <<<"$KERNEL_META_RECORDS" | sort -u)"
 if [[ -n "$META_KERNELS" ]]; then
   ok "已安装内核元包，后续内核通常可随 APT 持续更新："
   sed 's/^/  /' <<<"$META_KERNELS"
 else
   warn "未发现 linux-image-* 内核元包；未来可能收不到新 ABI 内核。请按机器类型确认应安装 linux-image-amd64、linux-image-cloud-amd64 或 linux-image-arm64 等元包。"
+fi
+
+if ((IN_CONTAINER == 0)) && [[ -n "$KERNEL_PACKAGE" && -n "$BINARY_VERSION" && -n "$KERNEL_META_RECORDS" ]]; then
+  MATCHING_META_RECORD="$(matching_kernel_meta_record "$RUNNING_RELEASE" <<<"$KERNEL_META_RECORDS" || true)"
+  if [[ -n "$MATCHING_META_RECORD" ]]; then
+    IFS='|' read -r MATCHING_META META_VERSION TARGET_KERNEL_PACKAGE TARGET_KERNEL_VERSION TARGET_KERNEL_SOURCE TARGET_KERNEL_SOURCE_VERSION <<<"$MATCHING_META_RECORD"
+    info "当前内核系列由 $MATCHING_META $META_VERSION 跟踪；元包目标：$TARGET_KERNEL_PACKAGE $TARGET_KERNEL_VERSION"
+    if ! is_official_debian_kernel_source "$TARGET_KERNEL_SOURCE"; then
+      blocker "内核元包目标来自非 Debian 官方内核源包 $TARGET_KERNEL_SOURCE，已停止自动判断和重启。"
+    elif [[ "$TARGET_KERNEL_PACKAGE" == "$KERNEL_PACKAGE" ]]; then
+      ok "当前正在运行内核元包指向的最新内核。"
+    elif kernel_target_requires_reboot "$KERNEL_PACKAGE" "$BINARY_VERSION" "$TARGET_KERNEL_PACKAGE" "$TARGET_KERNEL_VERSION"; then
+      REBOOT_RECOMMENDED=1
+      if ((RUNNING_KERNEL_VULNERABLE)); then
+        info "内核元包指向的较新官方内核已经安装，重启后将启用：$TARGET_KERNEL_PACKAGE"
+      else
+        warn "较新的 Debian 官方内核已经安装，但当前仍在运行 $KERNEL_PACKAGE；需要重启以启用 $TARGET_KERNEL_PACKAGE。"
+      fi
+    else
+      ok "当前运行内核不低于内核元包目标；不会为较旧目标触发重启。"
+    fi
+  else
+    warn "已安装内核元包，但没有找到与当前 $RUNNING_RELEASE 同系列的元包；无法通用判断是否正在运行最新内核。"
+  fi
 fi
 
 if [[ -e /run/reboot-required ]]; then
@@ -1174,7 +1341,7 @@ elif have needrestart; then
     *) warn "needrestart 内核检查失败（退出码：$NEEDRESTART_STATUS），未据此触发自动重启。" ;;
   esac
 else
-  info "未安装 needrestart；仅能依据 /run/reboot-required 判断是否需要重启。"
+  info "未安装 needrestart；仍会依据 /run/reboot-required 和内核元包目标判断是否需要重启。"
 fi
 
 section "自动安全更新"
@@ -1193,7 +1360,7 @@ if installed unattended-upgrades; then
         warn "上一次受控安全更新执行失败；请查看：journalctl -u debian-security-check-auto-update.service"
       fi
       if grep -Fxq 'MODE="enabled-reboot"' "$AUTO_UPDATE_HELPER"; then
-        info "更新完整成功、本次新产生重启要求且无人登录时，才会自动重启。"
+        info "更新完整成功、本次新产生重启要求或安装新内核且无人登录时，才会自动重启。"
       else
         info "自动安装安全更新后不会自动重启。"
       fi
@@ -1301,7 +1468,7 @@ if [[ "$MODE" == "smart" || "$MODE" == "post-smart" ]]; then
       critical "自动重启失败。请确认有 root 权限后手动运行：$REBOOT_COMMAND"
     fi
   else
-    printf '%s当前没有剩余 APT 更新，也不需要重启；没有安装或删除额外软件包。%s\n' "$C_GREEN" "$C_RESET"
+    printf '%s当前没有剩余 APT 更新，也不需要重启；脚本没有删除软件包。%s\n' "$C_GREEN" "$C_RESET"
     if ((INTERACTIVE_MENU || RETURN_TO_MENU)) && [[ -r /dev/tty ]] && [[ -f "$SCRIPT_PATH" ]]; then
       info "3 秒后自动返回菜单。"
       sleep 3

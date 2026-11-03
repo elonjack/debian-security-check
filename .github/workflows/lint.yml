@@ -20,8 +20,8 @@ jobs:
         run: bash debian-security-check.sh --help
       - name: Version smoke test
         run: |
-          test "$(bash debian-security-check.sh --version)" = "1.4.0"
-          grep -q 'RELEASE_TAG="v1.4.0"' install.sh
+          test "$(bash debian-security-check.sh --version)" = "1.4.1"
+          grep -q 'RELEASE_TAG="v1.4.1"' install.sh
       - name: Safety self-test
         run: bash debian-security-check.sh --self-test
       - name: Interactive menu exit smoke test

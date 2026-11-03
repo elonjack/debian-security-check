@@ -11,12 +11,12 @@
 在 Debian VPS 或独立服务器上运行：
 
 ```bash
-curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.4.0/install.sh | bash
+curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v1.4.1/install.sh | bash
 ```
 
 安装器会自动：
 
-1. 从 `v1.4.0` GitHub Release 下载正式脚本和 `SHA256SUMS`。
+1. 从 `v1.4.1` GitHub Release 下载正式脚本和 `SHA256SUMS`。
 2. 校验脚本 SHA-256；不一致就停止，不会执行。
 3. 安装到 `$HOME/debian-security-check/`。
 4. 恢复终端输入并打开 `1/2/0` 中文菜单。
@@ -27,9 +27,9 @@ curl -fsSL https://github.com/elonjack/debian-security-check/releases/download/v
 
 ```bash
 curl -fL -o debian-security-check.sh \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.4.0/debian-security-check.sh
+  https://github.com/elonjack/debian-security-check/releases/download/v1.4.1/debian-security-check.sh
 curl -fL -o SHA256SUMS \
-  https://github.com/elonjack/debian-security-check/releases/download/v1.4.0/SHA256SUMS
+  https://github.com/elonjack/debian-security-check/releases/download/v1.4.1/SHA256SUMS
 grep '  debian-security-check.sh$' SHA256SUMS | sha256sum -c -
 ```
 
@@ -56,6 +56,7 @@ root 用户也可以去掉 `sudo`。不要把主脚本 `debian-security-check.sh
 - 检查 `bookworm-security` / `trixie-security` 软件源
 - 检查待更新软件包和被 hold 的软件包
 - 检查 `CVE-2026-98432` 对当前运行内核的影响
+- 读取当前内核系列对应的 Debian 元包目标，检查最新已安装官方内核是否真正处于运行状态
 - 识别容器、第三方内核、自编译内核和缺失的内核元包
 - 检查是否需要重启，以及是否启用了 `unattended-upgrades`
 - 如果已安装 `debsecan`，列出已有修复可安装的漏洞包
@@ -129,7 +130,7 @@ sudo bash "$HOME/debian-security-check/debian-security-check.sh"
 3. 显示 hold 包和待更新数量。
 4. 没有待更新包时跳过安装；有更新时先执行 `apt-get -s upgrade --with-new-pkgs` 模拟升级。
 5. 模拟通过后才执行正式的保守升级。
-6. 更新成功后重新检查安全源、待更新包、漏洞状态、运行中内核和重启需求。
+6. 更新成功后重新检查安全源、待更新包、漏洞状态，并比较运行中内核与 Debian 内核元包指向的最新内核。
 7. 只有复查确认没有剩余补丁、没有严重问题并且确实需要重启时才自动重启；检查或升级失败时绝不自动重启。
 
 脚本不会自动解除 hold，也不会运行会主动删除包的 `dist-upgrade/full-upgrade`。
@@ -150,6 +151,7 @@ sudo bash "$HOME/debian-security-check/debian-security-check.sh"
 没有安全阻断项
 当前 APT 索引中没有待更新软件包
 运行中内核达到脚本列出的 CVE 修复线
+运行中内核就是对应 Debian 内核元包当前指向的最新已安装内核
 系统不再要求重启
 ```
 
@@ -186,7 +188,7 @@ sudo bash "$HOME/debian-security-check/debian-security-check.sh"
 - 只允许 Origin/Label 为 Debian 官方安全仓库的更新，不自动安装普通 stable 更新或第三方仓库更新。
 - 不自动删除软件包，不自动降级，不在关机过程中升级，也不会自动跨版本升级 Debian。
 - Debian 自带的 `Unattended-Upgrade::Automatic-Reboot` 始终保持关闭；重启只由本脚本受控执行器判断。
-- 选择自动重启后，也只有索引刷新成功、安全更新命令完整成功、且本次执行新产生 `/run/reboot-required` 时才继续；有登录用户时跳过自动重启。
+- 选择自动重启后，也只有索引刷新成功、安全更新命令完整成功，且本次执行新产生 `/run/reboot-required` 或新安装了尚未启用的官方内核时才继续；有登录用户时跳过自动重启。
 - 指定时间使用服务器本机时区；为避免多台服务器同时访问镜像并同时重启，每台机器会在指定时间后的 5 分钟随机窗口内开始，安装耗时也不固定，满足全部条件时会在安装结束后重启。
 - 定时器不补跑关机期间错过的任务；机器在当天时间窗口内关机，就等下一次计划时间。
 - 若因为有用户登录而跳过重启，脚本不会在用户退出后突然补重启；请在维护窗口手动重启或运行主菜单选项 `1`。
@@ -251,6 +253,8 @@ sudo apt-get install debsecan debian-security-support needrestart
 - Debian 12 的 6.12 内核：`linux-6.12` 6.12.113-1~deb12u1 或更高
 
 参考：[Debian Security Tracker: CVE-2026-98432](https://security-tracker.debian.org/tracker/CVE-2026-98432)
+
+这项 CVE 检查只是额外的已知漏洞核对，不再作为判断内核是否最新的唯一依据。即使当前内核已经越过该修复线，只要同系列 Debian 内核元包已经指向并安装了更新内核，脚本仍会要求重启启用新内核；因此以后出现新内核时不需要等待脚本再硬编码另一个 CVE 编号。
 
 ## 退出码
 
